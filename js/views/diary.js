@@ -4,6 +4,23 @@ import { dayTotals, targets } from '../calc.js';
 import { esc, fmt, fmtQty, parseNum, dateLabel, icon, on, toast, requestRender } from '../ui.js';
 import { nav } from '../app.js';
 import { openAddFood, openFoodDetail } from '../modals/food.js';
+import { driveConfigured, backupDue } from '../drive.js';
+
+const OVERDUE_MS = 3 * 24 * 60 * 60 * 1000;
+
+/** Slim tappable Google Drive banner (handler 'drive-backup' lives in views/settings.js). */
+function driveBanner() {
+  if (!driveConfigured() || !state.drive || !state.drive.connected) return '';
+  const d = state.drive;
+  let text = '';
+  if (d.lastError) {
+    text = 'Google Drive backup needs attention · Tap to back up';
+  } else if (backupDue()) {
+    const t = d.lastBackupAt ? Date.parse(d.lastBackupAt) : NaN;
+    if (!Number.isFinite(t) || Date.now() - t > OVERDUE_MS) text = 'Backup overdue · Tap to back up';
+  }
+  return text ? `<button type="button" class="banner" data-action="drive-backup">${esc(text)}</button>` : '';
+}
 
 function macroBar(label, eaten, target, color) {
   const pct = target > 0 ? Math.min(100, (eaten / target) * 100) : 0;
@@ -121,6 +138,7 @@ export function diaryView() {
       <button type="button" class="icon-btn" data-action="diary-shift" data-days="1" aria-label="Next day">${icon('right')}</button>
     </header>
     ${summaryCard(tot, t)}
+    ${driveBanner()}
     ${weighInCard(date)}
     ${sections.join('')}
     ${note}`;

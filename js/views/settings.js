@@ -1,10 +1,11 @@
-// MacroTally — Settings view: profile, food sources, meals, install, backup, about.
+// MacroTally — Settings view: profile, food sources, meals, install, Google Drive backup, backup, about.
 import { state, save, todayStr, exportJSON, importJSON, resetAll } from '../store.js';
 import { refreshExpenditure } from '../calc.js';
 import { REGIONS } from '../foods.js';
-import { esc, parseNum, on, toast, requestRender, confirmDialog } from '../ui.js';
+import { esc, fmt, parseNum, on, toast, requestRender, confirmDialog } from '../ui.js';
 import { nav } from '../app.js';
 import { openSetup } from '../modals/setup.js';
+import { driveConfigured, loadGIS, connectDrive, disconnectDrive, backupNow, fetchBackup, applyBackup } from '../drive.js';
 
 const APP_VERSION = '1.0.0';
 
@@ -100,6 +101,66 @@ function installCard() {
   return `<section class="card"><h2>Install</h2>${body}</section>`;
 }
 
+function plural(n, one, many = `${one}s`) {
+  return `${fmt(n)} ${n === 1 ? one : many}`;
+}
+
+/** Local date + time like 'Oct 28, 2026 3:12 PM'. */
+function backupDate(iso) {
+  const d = new Date(iso);
+  if (!iso || Number.isNaN(d.getTime())) return 'an unknown date';
+  const date = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return `${date} ${time}`;
+}
+
+/** 'just now', '5 min ago', '3 h ago', 'yesterday', '4 days ago', else a date. */
+function relativeTime(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return 'never from this device';
+  const mins = Math.max(0, Math.round((Date.now() - t) / 60000));
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return 'yesterday';
+  if (days < 14) return `${days} days ago`;
+  return backupDate(iso);
+}
+
+function summaryText(s) {
+  return `It has ${plural(s.days, 'logged day')}, ${plural(s.entries, 'entry', 'entries')}, ${plural(s.weights, 'weigh-in')} and ${plural(s.foods, 'food')}.`;
+}
+
+function driveCard() {
+  let body;
+  if (!driveConfigured()) {
+    body = '<p class="muted small">Not set up. The app owner needs to add a Google client ID in js/config.js (see README).</p>';
+  } else {
+    // Warm up Google sign-in so the popup can open straight from the button tap (iOS blocks late popups).
+    loadGIS().catch(() => {});
+    const d = state.drive;
+    if (!d.connected) {
+      body = `
+        <p class="small">Keeps a copy of your data in a private folder of your own Google Drive and refreshes it about once a day when you open the app. Nothing is shared with anyone else.</p>
+        <button type="button" class="btn btn-primary btn-block" data-action="drive-connect">Connect Google Drive</button>`;
+    } else {
+      body = `
+        <p class="small">Connected as <strong>${esc(d.email || 'your Google account')}</strong></p>
+        <p class="muted small">Last backup: ${esc(d.lastBackupAt ? relativeTime(d.lastBackupAt) : 'never from this device')}</p>
+        ${d.lastError ? `<p class="small over">${esc(d.lastError)}</p>` : ''}
+        <label class="check-row"><input type="checkbox" data-change="drive-auto"${d.autoBackup ? ' checked' : ''}><span>Back up automatically</span></label>
+        <div class="btn-stack">
+          <button type="button" class="btn btn-primary btn-block" data-action="drive-backup">Back up now</button>
+          <button type="button" class="btn btn-ghost btn-block" data-action="drive-restore">Restore from Drive</button>
+          <button type="button" class="btn btn-ghost btn-ghost-danger btn-block" data-action="drive-disconnect">Disconnect</button>
+        </div>`;
+    }
+  }
+  return `<section class="card"><h2>Google Drive backup</h2>${body}</section>`;
+}
+
 /**
  * Settings tab.
  * @returns {string} HTML
@@ -163,6 +224,8 @@ export function settingsView() {
 
     ${installCard()}
 
+    ${driveCard()}
+
     <section class="card">
       <h2>Backup</h2>
       <p class="muted small">Your data lives only in this browser. Export a backup now and then, especially before clearing site data or switching phones.</p>
@@ -178,7 +241,7 @@ export function settingsView() {
     <section class="card about">
       <h2>About</h2>
       <p class="small">MacroTally is a free, open macro tracker: barcode scanning, trend weight and an adaptive expenditure estimate.</p>
-      <p class="small"><strong>Privacy:</strong> there is no server and no account. Everything you log stays on this device. Food searches go directly to Open Food Facts (and USDA if you add a key).</p>
+      <p class="small"><strong>Privacy:</strong> there is no server and no account. Everything you log stays on this device${driveConfigured() ? ' (plus your own Google Drive if you connect it)' : ''}. Food searches go directly to Open Food Facts (and USDA if you add a key).</p>
       <p class="muted small">Version ${esc(APP_VERSION)} · Food data © Open Food Facts contributors (ODbL)</p>
     </section>`;
 }
@@ -305,4 +368,74 @@ on('erase-all', async () => {
   if (!ok) return;
   resetAll();
   location.reload();
+});
+
+// ---------- Google Drive backup ----------
+
+let driveBusy = false;
+
+/** Run one Drive operation at a time; errors become toasts; always re-render afterwards. */
+async function driveTask(fn) {
+  if (driveBusy) return;
+  driveBusy = true;
+  try {
+    await fn();
+  } catch (err) {
+    const msg = err && err.message ? err.message : 'Something went wrong';
+    if ((err && err.cancelled) || /popup|cancel/i.test(msg)) toast('Sign-in was cancelled.');
+    else toast(msg, { kind: 'error' });
+  } finally {
+    driveBusy = false;
+    requestRender();
+  }
+}
+
+async function restoreFlow(question) {
+  toast('Checking Google Drive…');
+  const backup = await fetchBackup({ interactive: true });
+  const ok = await confirmDialog(question(backupDate(backup.modifiedTime), summaryText(backup.summary)), { okLabel: 'Replace', danger: true });
+  if (!ok) return false;
+  applyBackup(backup.text);
+  toast('Backup restored');
+  setTimeout(() => location.reload(), 400);
+  return true;
+}
+
+on('drive-connect', (el) => driveTask(async () => {
+  el.disabled = true;
+  toast('Connecting to Google Drive…');
+  const { existing } = await connectDrive();
+  if (!existing) {
+    toast('Backed up to Google Drive');
+    return;
+  }
+  // This account already has a backup (e.g. from another phone): offer it before overwriting it.
+  requestRender();
+  const restored = await restoreFlow((when, summary) =>
+    `Your Google Drive already has a MacroTally backup from ${when}. ${summary} Replace everything on this device with it?`);
+  // Declined: nothing is overwritten now; the next backup (automatic or Back up now) replaces the Drive copy.
+  if (!restored) toast("Kept this device's data. The next backup will replace the Drive copy.", { ms: 4000 });
+}));
+
+on('drive-backup', (el) => driveTask(async () => {
+  el.disabled = true;
+  toast('Backing up…');
+  await backupNow({ interactive: true });
+  toast('Backed up to Google Drive');
+}));
+
+on('drive-restore', (el) => driveTask(async () => {
+  el.disabled = true;
+  await restoreFlow((when, summary) => `Replace everything on this device with the Drive backup from ${when}? ${summary}`);
+}));
+
+on('drive-disconnect', () => driveTask(async () => {
+  await disconnectDrive();
+  toast('Disconnected from Google Drive');
+}));
+
+on('drive-auto', (el) => {
+  state.drive.autoBackup = !!el.checked;
+  save();
+  requestRender();
 });

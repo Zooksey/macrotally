@@ -179,7 +179,15 @@ function hideResults(sheet) {
 
 async function runSearch(sheet, q, seq) {
   try {
-    const foods = await searchFoods(q, { usdaKey: state.profile.usdaKey || '', region: state.profile.region || 'world' });
+    let foods;
+    if (/^\d{8,14}$/.test(q)) {
+      // A typed barcode: the product endpoint is far more reliable than text search.
+      const local = Object.values(state.foods).find((f) => f.barcode === q);
+      const found = local || await lookupBarcode(q);
+      foods = found ? [found] : [];
+    } else {
+      foods = await searchFoods(q, { usdaKey: state.profile.usdaKey || '', region: state.profile.region || 'world' });
+    }
     if (seq !== searchSeq || !sheet.isConnected) return;
     showResults(sheet, q, foods || []);
   } catch (err) {

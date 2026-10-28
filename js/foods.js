@@ -291,7 +291,11 @@ async function searchFoodsUncached(q, { usdaKey, region }) {
     : Promise.resolve([]);
   const [off, usda] = await Promise.allSettled([offP, usdaP]);
   const usdaFoods = usda.status === 'fulfilled' ? usda.value : [];
-  if (off.status === 'rejected' && !usdaFoods.length) throw off.reason;
+  if (off.status === 'rejected' && !usdaFoods.length) {
+    const err = off.reason instanceof Error ? off.reason : new Error(String(off.reason));
+    if (!key) err.message += ' Barcode scanning still works, and a free USDA key in Settings adds a second search source.';
+    throw err;
+  }
   const all = [...(off.status === 'fulfilled' ? off.value : []), ...usdaFoods];
   const seen = new Map();
   for (const f of all) if (!seen.has(f.id)) seen.set(f.id, f);
