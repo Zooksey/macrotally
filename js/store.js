@@ -84,17 +84,26 @@ export function defaults() {
     diary: {},
     recents: [],
     favorites: [],
-    meals: ['Breakfast', 'Lunch', 'Dinner', 'Snacks']
+    meals: ['Breakfast', 'Lunch', 'Dinner', 'Snacks'],
+    // Google Drive backup connection. Belongs to this device: kept as-is when a backup is imported.
+    drive: {
+      connected: false,
+      email: '',
+      fileId: null,
+      autoBackup: true,
+      lastBackupAt: null,
+      lastError: null
+    }
   };
 }
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** Object.assign(defaults(), obj), but nested profile/goal/expenditure objects are merged too. */
+/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/drive objects are merged too. */
 function merge(obj) {
   const out = Object.assign(defaults(), isObj(obj) ? obj : {});
   const d = defaults();
-  for (const k of ['profile', 'goal', 'expenditure']) {
+  for (const k of ['profile', 'goal', 'expenditure', 'drive']) {
     out[k] = Object.assign({}, d[k], isObj(out[k]) ? out[k] : {});
   }
   out.goal.manual = Object.assign({}, d.goal.manual, isObj(out.goal.manual) ? out.goal.manual : {});
@@ -173,7 +182,8 @@ export function exportJSON() {
 }
 
 /**
- * Restore a backup produced by exportJSON().
+ * Restore a backup produced by exportJSON(). This device's state.drive block is kept
+ * (the Drive connection belongs to the device, not to the backup).
  * @param {string} text
  * @throws {Error} 'Not a MacroTally backup' when the JSON is invalid or lacks diary/version.
  * @returns {void}
@@ -186,7 +196,10 @@ export function importJSON(text) {
     throw new Error('Not a MacroTally backup');
   }
   if (!obj || typeof obj !== 'object' || !obj.diary || !obj.version) throw new Error('Not a MacroTally backup');
+  const keep = state.drive;
   replaceState(obj);
+  state.drive = keep;
+  save();
 }
 
 // ---------- Units ----------

@@ -320,6 +320,10 @@ svg {
   color: var(--danger);
 }
 
+.btn-ghost-danger {
+  color: var(--danger);
+}
+
 .btn-block {
   display: flex;
   width: 100%;
@@ -459,6 +463,48 @@ input[type="radio"],
 input[type="checkbox"] {
   width: auto;
   min-height: 0;
+}
+
+/* Labelled checkbox row (native checkbox look; the generic input reset above hides the check mark). */
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.check-row input[type="checkbox"] {
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  accent-color: var(--accent);
+}
+
+/* Slim full-width tappable notice row (e.g. Google Drive backup on the Diary). */
+.banner {
+  display: block;
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 11px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
 }
 
 .field-row {

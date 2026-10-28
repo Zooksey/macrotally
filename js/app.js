@@ -7,6 +7,7 @@ import { weightView } from './views/weight.js';
 import { planView } from './views/plan.js';
 import { settingsView } from './views/settings.js';
 import { openSetup } from './modals/setup.js';
+import { autoBackupIfDue } from './drive.js';
 import './modals/food.js';
 
 /**
@@ -75,15 +76,17 @@ on('tab', (el) => {
 function onVisible() {
   if (document.visibilityState !== 'visible') return;
   const today = todayStr();
-  if (today === lastToday) return;
-  if (nav.date === lastToday) nav.date = today;
-  lastToday = today;
-  try {
-    if (refreshExpenditure(state)) save();
-  } catch (err) {
-    console.error(err);
+  if (today !== lastToday) {
+    if (nav.date === lastToday) nav.date = today;
+    lastToday = today;
+    try {
+      if (refreshExpenditure(state)) save();
+    } catch (err) {
+      console.error(err);
+    }
+    render();
   }
-  render();
+  autoBackupIfDue(); // fire-and-forget; never throws
 }
 
 function registerServiceWorker() {
@@ -107,7 +110,12 @@ function start() {
     console.error(err);
   }
   bindGlobalEvents();
-  document.addEventListener('render', render);
+  document.addEventListener('render', () => {
+    render();
+    // Re-renders follow user actions (logging a food, a weigh-in), which is the only time a browser
+    // lets Google's token popup open; drive.js checks that and no-ops otherwise.
+    autoBackupIfDue();
+  });
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
@@ -121,6 +129,7 @@ function start() {
   registerServiceWorker();
   render();
   if (!state.onboarded) openSetup();
+  autoBackupIfDue(); // fire-and-forget; never throws, no-op unless Drive backup is configured and connected
 }
 
 start();

@@ -8,7 +8,7 @@ A free, account-less macro tracker you host yourself and run on your phone. It r
 - **Goal setting**: lose, maintain or gain at a chosen rate per week, with protein and fat preferences, and an estimated finish date.
 - **Trend weight**: daily weigh-ins smoothed into a trend line so water-weight noise does not hide progress.
 - **Adaptive expenditure**: your maintenance calories are estimated weekly from what you actually ate versus how your trend weight moved, and your calorie target follows it. This is the MacroFactor "algorithm", done in the open.
-- **Backup / restore** as a JSON file. Installable as a home-screen app that works offline for everything except new food lookups.
+- **Backup / restore** as a JSON file, plus an optional automatic daily backup to each user's own Google Drive. Installable as a home-screen app that works offline for everything except new food lookups.
 
 There is no server, no login and no analytics. Everyone who opens the link gets their own copy; their diary, weights and goals are stored only in their own browser on their own phone.
 
@@ -68,16 +68,51 @@ Then open `http://localhost:8080/`. `localhost` counts as secure, so the camera 
 - [Open Food Facts](https://world.openfoodfacts.org) is always on and needs no key. Coverage of packaged foods is good but not perfect, and some entries have incomplete nutrition. If a scan is not found you can create the food once and it is remembered by barcode. Text search is limited by Open Food Facts to roughly 10 searches a minute per phone, so the app waits for you to stop typing before searching and remembers results you already fetched. Set your **Search region** in Settings so results are ranked by what is popular in your country.
 - [USDA FoodData Central](https://fdc.nal.usda.gov/) adds whole foods and US branded items. Get a free API key at https://fdc.nal.usda.gov/api-key-signup and paste it into Settings.
 
+## Google Drive backup (optional, for the app owner)
+
+Each person who uses your link can connect their own Google account, and MacroTally will keep a copy of their data in a hidden, app-only folder of *their* Google Drive. It refreshes the copy about once a day when they open the app, and Settings has **Back up now** and **Restore from Drive** buttons. There is still no server: the phone talks to Google directly.
+
+The feature stays hidden until you, the person hosting the app, create a free Google "OAuth client ID" and paste it into `js/config.js`. You only do this once. If you have never used Google Cloud before, follow these steps exactly:
+
+1. Go to https://console.cloud.google.com/ and sign in with your Google account. Click the project picker at the top, then **New project**, name it (e.g. "MacroTally") and click **Create**. Make sure the new project is selected in the picker.
+2. Open the menu (☰) → **APIs & Services** → **Library**. Search for **Google Drive API**, open it and click **Enable**.
+3. Menu → **APIs & Services** → **OAuth consent screen** (newer consoles call this **Google Auth Platform**; click **Get started** if asked).
+   - User type / Audience: **External**.
+   - App name: "MacroTally". User support email and developer contact email: your email.
+   - Under **Scopes** (or **Data access**) click **Add or remove scopes** and add `.../auth/drive.appdata` and `.../auth/userinfo.email`, then save.
+   - Then go to **Audience** (or **Publishing status**) and click **Publish app**. These two scopes are non-sensitive, so Google does not require a review. While the app is left in "Testing", only the test users you list there can sign in.
+4. Menu → **APIs & Services** → **Credentials** → **Create credentials** → **OAuth client ID**.
+   - Application type: **Web application**.
+   - **Authorized JavaScript origins**: add `https://YOUR-USER.github.io` (your GitHub Pages address, without the `/macrotally/` path) and `http://localhost:8765` (for local testing).
+   - No redirect URIs are needed. Click **Create** and copy the **Client ID** (it ends in `.apps.googleusercontent.com`).
+5. Paste the client ID into `js/config.js`:
+
+   ```js
+   googleClientId: '1234567890-abc123.apps.googleusercontent.com'
+   ```
+
+   Then bump `VERSION` in `sw.js`, commit and push.
+
+To try it locally, serve the folder on the port you authorized: `python -m http.server 8765`, then open `http://localhost:8765/`.
+
+Good to know:
+
+- The client ID is not a secret; it is fine for it to be in a public repository.
+- Each user's backup goes to their own Google Drive, in a hidden app folder that only MacroTally can read. You, the owner, never see anyone's data, and nothing touches your own Drive.
+- Disconnecting in Settings does not delete the backup file. Users can remove it under Google Drive → Settings (gear) → **Manage apps** → MacroTally → **Delete hidden app data**.
+
 ## Layout
 
 ```
 index.html            app shell
 css/app.css           styles, light and dark
+js/config.js          app owner settings (Google client ID for Drive backup)
 js/store.js           state and localStorage persistence
 js/calc.js            trend weight, expenditure, targets
 js/foods.js           Open Food Facts / USDA lookup, portion scaling
 js/scanner.js         camera barcode scanning
 js/charts.js          inline SVG charts
+js/drive.js           optional Google Drive backup (Google sign-in + Drive API)
 js/ui.js, js/app.js   rendering, routing, modals
 js/views/*.js         Diary, Weight, Plan, Settings screens
 js/modals/*.js        add food, food detail, custom food, scanner, setup wizard
