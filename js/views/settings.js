@@ -7,7 +7,7 @@ import { nav } from '../app.js';
 import { openSetup } from '../modals/setup.js';
 import { driveConfigured, loadGIS, connectDrive, disconnectDrive, backupNow, fetchBackup, applyBackup } from '../drive.js';
 
-const APP_VERSION = '1.0.0';
+import { APP_VERSION, checkForUpdate, updateAvailable } from '../update.js';
 
 /** Activity multipliers used for the initial expenditure estimate. */
 export const ACTIVITY_LEVELS = [
@@ -207,10 +207,10 @@ export function settingsView() {
         </select>
       </label>
       <p class="hint">Ranks search results by what is popular in your country. Barcodes are looked up worldwide.</p>
-      <label class="field"><span>USDA FoodData Central API key (optional)</span>
-        <input name="usdaKey" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(p.usdaKey)}" placeholder="Paste your free key">
+      <label class="field"><span>USDA API key (optional: your own key; a shared one is built in)</span>
+        <input name="usdaKey" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(p.usdaKey)}" placeholder="Leave empty to use the shared key">
       </label>
-      <p class="hint">Adds generic foods (fruit, meat, rice…) to search results. Get a free key at <a href="https://fdc.nal.usda.gov/api-key-signup" target="_blank" rel="noopener noreferrer">fdc.nal.usda.gov</a>.</p>
+      <p class="hint">USDA adds generic foods (fruit, meat, rice…) and US branded products to search and barcode lookups. The shared key has an hourly limit for everyone; a free key of your own from <a href="https://fdc.nal.usda.gov/api-key-signup" target="_blank" rel="noopener noreferrer">fdc.nal.usda.gov</a> avoids it.</p>
       <button type="submit" class="btn btn-primary btn-block">Save food sources</button>
     </form>
 
@@ -241,10 +241,24 @@ export function settingsView() {
     <section class="card about">
       <h2>About</h2>
       <p class="small">MacroTally is a free, open macro tracker: barcode scanning, trend weight and an adaptive expenditure estimate.</p>
-      <p class="small"><strong>Privacy:</strong> there is no server and no account. Everything you log stays on this device${driveConfigured() ? ' (plus your own Google Drive if you connect it)' : ''}. Food searches go directly to Open Food Facts (and USDA if you add a key).</p>
-      <p class="muted small">Version ${esc(APP_VERSION)} · Food data © Open Food Facts contributors (ODbL)</p>
+      <p class="small"><strong>Privacy:</strong> there is no server and no account. Everything you log stays on this device${driveConfigured() ? ' (plus your own Google Drive if you connect it)' : ''}. Food searches go directly to Open Food Facts and USDA FoodData Central.</p>
+      <p class="muted small">Version ${esc(APP_VERSION)} · Food data © Open Food Facts contributors (ODbL) and USDA FoodData Central</p>
+      ${updateAvailable()
+        ? '<button type="button" class="btn btn-primary btn-block" data-action="app-update">Reload to update</button>'
+        : '<button type="button" class="btn btn-ghost btn-block" data-action="check-update">Check for updates</button>'}
+      <p class="hint">Updates install on their own when you open the app; closing it fully and reopening is enough. You never need to re-add it to your home screen.</p>
     </section>`;
 }
+
+on('check-update', async (el) => {
+  el.disabled = true;
+  toast('Checking…');
+  const result = await checkForUpdate();
+  if (result === 'ready') toast('A new version is ready. Reload to update.');
+  else if (result === 'current') toast(`You're on the latest version (${APP_VERSION}).`);
+  else toast('Updates are handled by your browser here.');
+  requestRender();
+});
 
 on('save-profile', (form) => {
   const p = state.profile;

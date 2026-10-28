@@ -5,6 +5,14 @@ import { esc, fmt, fmtQty, parseNum, dateLabel, icon, on, toast, requestRender }
 import { nav } from '../app.js';
 import { openAddFood, openFoodDetail } from '../modals/food.js';
 import { driveConfigured, backupDue } from '../drive.js';
+import { updateAvailable } from '../update.js';
+
+/** Banner shown once a newer app version has installed in the background. */
+function updateBanner() {
+  return updateAvailable()
+    ? '<button type="button" class="banner" data-action="app-update">New version ready · Tap to reload</button>'
+    : '';
+}
 
 const OVERDUE_MS = 3 * 24 * 60 * 60 * 1000;
 
@@ -137,6 +145,7 @@ export function diaryView() {
       </div>
       <button type="button" class="icon-btn" data-action="diary-shift" data-days="1" aria-label="Next day">${icon('right')}</button>
     </header>
+    ${updateBanner()}
     ${summaryCard(tot, t)}
     ${driveBanner()}
     ${weighInCard(date)}

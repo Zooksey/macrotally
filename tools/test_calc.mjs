@@ -14,6 +14,8 @@ const store = await import('../js/store.js');
 const calc = await import('../js/calc.js');
 const foods = await import('../js/foods.js');
 const charts = await import('../js/charts.js');
+const builtin = await import('../js/builtin.js');
+const { config } = await import('../js/config.js');
 
 let passed = 0;
 function test(name, fn) {
@@ -294,6 +296,231 @@ test('makeCustomFood per-serving → per-100g', () => {
   assert.equal(g.servings[0].label, '1 serving (30 g)');
   assert.throws(() => foods.makeCustomFood({ name: 'X', per: 'serving', servingGrams: 0, cal: 1, p: 0, c: 0, f: 0 }));
 });
+
+// ---------- search: ranking ----------
+test('tokenize', () => {
+  assert.deepEqual(foods.tokenize('Chicken, breast (raw)!'), ['chicken', 'breast', 'raw']);
+  // Light plural stemming: trailing s dropped, "ies" → "y".
+  assert.deepEqual(foods.tokenize("Bob's Red-Mill  OATS"), ['bob', 'red', 'mill', 'oat']);
+  assert.deepEqual(foods.tokenize('Strawberries, hummus, glass'), ['strawberry', 'hummus', 'glass']);
+  assert.deepEqual(foods.tokenize('  '), []);
+  assert.deepEqual(foods.tokenize('!!!'), []);
+  assert.deepEqual(foods.tokenize(null), []);
+  assert.deepEqual(foods.tokenize(undefined), []);
+  assert.deepEqual(foods.tokenize(42), ['42']);
+});
+
+const mk = (id, name, extra = {}) => ({
+  id, source: 'off', barcode: null, name, brand: '',
+  per100: { cal: 100, p: 10, c: 10, f: 1, fiber: 0 }, servings: [], defaultGrams: 100, ...extra
+});
+
+test('scoreFood ordering: phrase match, length, partial factor, no match', () => {
+  const generic = mk('usda:171077', 'Chicken, breast, skinless, boneless, raw', { source: 'builtin' });
+  const sandwich = mk('off:1', 'Chicken breast sandwich');
+  const pork = mk('usda:2', 'Pork chop', { source: 'builtin' });
+  const q = 'chicken breast';
+  const sG = foods.scoreFood(q, generic);
+  const sS = foods.scoreFood(q, sandwich);
+  // Both match every token; the generic (phrase match on tokens, curated bonus) beats the one with an extra word.
+  assert.ok(sS > 0 && sG > sS, `generic ${sG} > sandwich ${sS}`);
+  assert.equal(foods.scoreFood(q, pork), 0);
+  assert.ok(sG > foods.scoreFood(q, pork));
+  // One misspelled token: still surfaces (x 0.25), far below a full match.
+  const typo = foods.scoreFood('chicken brest', generic);
+  assert.ok(typo > 0 && typo < sG / 2, `typo ${typo}`);
+  // Equal match: the long description loses to the short name (-0.05 per token beyond 6).
+  const short = mk('off:2', 'Rolled oats');
+  const long = mk('off:3', 'Rolled oats old fashioned whole grain thick cut organic');
+  assert.ok(foods.scoreFood('rolled oats', short) > foods.scoreFood('rolled oats', long));
+  // Brand-only prefix counts less than a name prefix.
+  assert.ok(foods.scoreFood('quaker', mk('off:4', 'Quaker oats')) > foods.scoreFood('quaker', mk('off:5', 'Oats', { brand: 'Quaker' })));
+  // Popularity and completeness.
+  assert.ok(foods.scoreFood('oats', mk('off:6', 'Oats', { pop: 5000 })) > foods.scoreFood('oats', mk('off:7', 'Oats')));
+  const empty = mk('off:8', 'Oats', { per100: { cal: 0, p: 0, c: 0, f: 0, fiber: 0 } });
+  near(foods.scoreFood('oats', mk('off:9', 'Oats')) - foods.scoreFood('oats', empty), 4, 1e-9, 'all-zero penalty');
+  assert.equal(foods.scoreFood('', generic), 0);
+  assert.equal(foods.scoreFood('%%', generic), 0);
+});
+
+test('scoreFood: library boost beats built-in boost at equal match; favorites/recents add more', () => {
+  const builtinFood = mk('usda:1', 'Banana, raw', { source: 'builtin' });
+  const lib = mk('off:10', 'Banana, raw');
+  const localIds = new Set(['off:10']);
+  const sB = foods.scoreFood('banana', builtinFood, { localIds });
+  const sL = foods.scoreFood('banana', lib, { localIds });
+  assert.ok(sL > sB, `library ${sL} > builtin ${sB}`);
+  const sFav = foods.scoreFood('banana', lib, { localIds, favoriteIds: new Set(['off:10']), recentIds: new Set(['off:10']) });
+  near(sFav - sL, 3, 1e-9, 'favorite +2, recent +1');
+  // Same name + brand: de-duplicated, keeping the library copy.
+  const ranked = foods.rankFoods('banana', [builtinFood, lib], { localIds });
+  assert.deepEqual(ranked.map((f) => f.id), ['off:10']);
+});
+
+test('rankFoods: de-duplication by barcode (leading zeros ignored), id, limit, odd input', () => {
+  const a = mk('off:0041196910759', 'Progresso soup', { barcode: '0041196910759', pop: 100 });
+  const b = mk('usda:555', 'PROGRESSO CHICKEN NOODLE SOUP', { barcode: '041196910759', source: 'usda' });
+  const c = mk('off:0041196910759', 'Progresso soup copy', { barcode: null });
+  const r = foods.rankFoods('progresso soup', [b, a, c]);
+  assert.equal(r.length, 1);
+  assert.equal(r[0], a, 'higher-scored barcode twin kept');
+  const many = Array.from({ length: 50 }, (_, i) => mk(`off:x${i}`, `Apple ${i}`));
+  assert.equal(foods.rankFoods('apple', many).length, 40);
+  assert.equal(foods.rankFoods('apple', many, { limit: 5 }).length, 5);
+  assert.deepEqual(foods.rankFoods('apple', null), []);
+  assert.deepEqual(foods.rankFoods(null, [null, {}, mk('off:z', 'Zed')]).map((f) => f.id), ['off:z']);
+});
+
+test('foodFromOFF keeps pop from unique_scans_n', () => {
+  const base = { code: '111', product_name: 'Oats', nutriments: { 'energy-kcal_100g': 380, proteins_100g: 13 } };
+  assert.equal(foods.foodFromOFF({ ...base, unique_scans_n: 1234 }).pop, 1234);
+  assert.equal(foods.foodFromOFF({ ...base, unique_scans_n: '56' }).pop, 56);
+  assert.equal(foods.foodFromOFF(base).pop, 0);
+});
+
+test('searchLocal: tiny built-in list + library, ranked; odd input never throws', () => {
+  const list = [
+    mk('usda:1', 'Chicken, breast, skinless, boneless, raw', { source: 'builtin' }),
+    mk('usda:2', 'Chicken, thigh, raw', { source: 'builtin' }),
+    mk('usda:3', 'Pork, chop, raw', { source: 'builtin' }),
+    mk('usda:4', 'Oats', { source: 'builtin' })
+  ];
+  const library = { 'custom:a': mk('custom:a', 'Chicken breast meal prep', { source: 'custom' }) };
+  const r = foods.searchLocal('chicken breast', { library, builtin: list, recents: [], favorites: [] });
+  assert.deepEqual(r.map((f) => f.id), ['custom:a', 'usda:1', 'usda:2']);
+  assert.ok(!r.some((f) => f.id === 'usda:3'), 'non-matching food excluded');
+  assert.deepEqual(foods.searchLocal('oat', { library: [], builtin: list }).map((f) => f.id), ['usda:4']);
+  for (const q of ['', ' ', '!!!', '%%%', '((', '"<script>', null, undefined, 123, '\u{1F34C}']) {
+    assert.ok(Array.isArray(foods.searchLocal(q, { library, builtin: list, recents: null, favorites: undefined })), `query ${String(q)}`);
+  }
+  assert.deepEqual(foods.searchLocal('!!!', { library, builtin: list }), []);
+  assert.deepEqual(foods.searchLocal('chicken', {}), []);
+  assert.deepEqual(foods.searchLocal('chicken'), []);
+});
+
+test('effectiveUsdaKey: own key (trimmed) overrides the shared one', () => {
+  assert.equal(foods.effectiveUsdaKey({ usdaKey: '  mine  ' }), 'mine');
+  assert.equal(foods.effectiveUsdaKey({ usdaKey: '   ' }), String(config.usdaApiKey || '').trim());
+  assert.equal(foods.effectiveUsdaKey({}), String(config.usdaApiKey || '').trim());
+});
+
+// ---------- network paths with a stubbed fetch (no real requests) ----------
+async function testAsync(name, fn) {
+  try {
+    await fn();
+    passed++;
+    console.log(`ok   ${name}`);
+  } catch (e) {
+    console.error(`FAIL ${name}\n     ${e.message}`);
+    process.exitCode = 1;
+  }
+}
+const realFetch = globalThis.fetch;
+const jsonRes = (data, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => data });
+const usdaItem = (fdcId, description, extra = {}) => ({
+  fdcId, description,
+  foodNutrients: [{ nutrientNumber: '208', value: 165 }, { nutrientNumber: '203', value: 31 }, { nutrientNumber: '204', value: 3.6 }],
+  ...extra
+});
+
+await testAsync('loadBuiltinFoods: [] on failure (retries later), converts records, fetches once', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; throw new TypeError('offline'); };
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.deepEqual(await builtin.loadBuiltinFoods(), []);
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.deepEqual(builtin.builtinFoods(), []);
+  const fixture = {
+    version: 1, source: 'test', generated: '2026-10-28',
+    foods: [
+      { id: 'usda:171077', n: 'Chicken, breast, skinless, boneless, raw', c: 'Poultry', p100: [120, 22.5, 0, 2.6, 0], s: [['1 breast', 174], ['1 oz', 28.35]] },
+      { id: 'usda:9', n: 'Water, tap', c: 'Beverages', p100: [0, 0, 0, 0, 0], s: [] },
+      { n: 'no id' }
+    ]
+  };
+  let url = '';
+  globalThis.fetch = async (u) => { calls++; url = String(u); return jsonRes(fixture); };
+  const list = await builtin.loadBuiltinFoods();
+  assert.ok(url.endsWith('/data/foods.json'), url);
+  assert.equal(list.length, 2);
+  assert.deepEqual(list[0], {
+    id: 'usda:171077', source: 'builtin', barcode: null, name: 'Chicken, breast, skinless, boneless, raw', brand: '',
+    category: 'Poultry', per100: { cal: 120, p: 22.5, c: 0, f: 2.6, fiber: 0 },
+    servings: [{ label: '1 breast (174 g)', grams: 174 }, { label: '1 oz (28.35 g)', grams: 28.35 }], defaultGrams: 174
+  });
+  assert.equal(list[1].defaultGrams, 100);
+  await builtin.loadBuiltinFoods();
+  builtin.preloadBuiltinFoods();
+  assert.equal(calls, 2, 'one failed + one successful fetch');
+  assert.equal(builtin.builtinFoods(), list);
+});
+
+await testAsync('lookupBarcode: USDA Branded fallback matches gtinUpc ignoring leading zeros', async () => {
+  const urls = [];
+  globalThis.fetch = async (u) => {
+    urls.push(String(u));
+    if (String(u).includes('openfoodfacts')) return jsonRes({ status: 0 }, 404);
+    return jsonRes({ foods: [usdaItem(1, 'OTHER', { gtinUpc: '999' }), usdaItem(2, 'RICE NOODLES', { gtinUpc: '00737628064502', brandOwner: 'Thai Kitchen' })] });
+  };
+  const f = await foods.lookupBarcode('737628064502', { usdaKey: 'k' });
+  assert.equal(f.id, 'usda:2');
+  assert.equal(f.brand, 'Thai Kitchen');
+  const usdaUrl = urls.find((u) => u.includes('api.nal.usda.gov'));
+  assert.ok(usdaUrl.includes('dataType=Branded') && usdaUrl.includes('pageSize=5') && usdaUrl.includes('query=737628064502'), usdaUrl);
+  urls.length = 0;
+  assert.equal(await foods.lookupBarcode('737628064502'), null, 'no key: OFF only');
+  assert.ok(urls.every((u) => u.includes('openfoodfacts')));
+  // OFF unreachable but USDA has it: found. Neither: the OFF error is thrown.
+  globalThis.fetch = async (u) => {
+    if (String(u).includes('openfoodfacts')) throw new TypeError('blocked');
+    return jsonRes({ foods: [usdaItem(3, 'SOUP', { gtinUpc: '41196910759' })] });
+  };
+  assert.equal((await foods.lookupBarcode('0041196910759', { usdaKey: 'k' })).id, 'usda:3');
+  globalThis.fetch = async (u) => {
+    if (String(u).includes('openfoodfacts')) throw new TypeError('blocked');
+    return jsonRes({ foods: [] });
+  };
+  await assert.rejects(foods.lookupBarcode('0041196910759', { usdaKey: 'k' }), /Open Food Facts/);
+});
+
+await testAsync('searchFoods: parallel sources, built-in duplicates dropped, failure handling', async () => {
+  const off = { products: [{ code: '123', product_name: 'Chicken breast strips', unique_scans_n: 40, nutriments: { 'energy-kcal_100g': 110, proteins_100g: 23 } }] };
+  const usda = { foods: [usdaItem(171077, 'Chicken, breast, skinless, boneless, raw'), usdaItem(777, 'Chicken breast, grilled')] };
+  let urls = [];
+  globalThis.fetch = async (u) => {
+    urls.push(String(u));
+    return String(u).includes('openfoodfacts') ? jsonRes(off) : jsonRes(usda);
+  };
+  const r = await foods.searchFoods('chicken breast', { usdaKey: 'k', region: 'us' });
+  assert.deepEqual(r.map((f) => f.id).sort(), ['off:123', 'usda:777'], 'usda:171077 duplicates a built-in food');
+  assert.equal(r.find((f) => f.id === 'off:123').pop, 40);
+  const uUrl = urls.find((u) => u.includes('api.nal.usda.gov'));
+  assert.ok(uUrl.includes('pageSize=25') && uUrl.includes(encodeURIComponent('Foundation,SR Legacy,Branded')), uUrl);
+  assert.ok(urls.some((u) => u.startsWith('https://us.openfoodfacts.org/') && u.includes('unique_scans_n')));
+  urls = [];
+  await foods.searchFoods('chicken breast', { usdaKey: 'k', region: 'us' });
+  assert.equal(urls.length, 0, 'session cache');
+  // OFF down, USDA works: USDA results, no throw (and not cached, so the next call retries).
+  globalThis.fetch = async (u) => {
+    if (String(u).includes('openfoodfacts')) return jsonRes({}, 503);
+    return jsonRes(usda);
+  };
+  assert.deepEqual((await foods.searchFoods('grilled chicken', { usdaKey: 'k' })).map((f) => f.id), ['usda:777']);
+  urls = [];
+  globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes({}, 503); };
+  await assert.rejects(foods.searchFoods('grilled chicken', { usdaKey: 'k' }), /busy or rate-limiting/);
+  assert.equal(urls.length, 2, 'partial result was not cached');
+  // No key: only OFF; its failure carries the scanning tip.
+  urls = [];
+  globalThis.fetch = async (u) => { urls.push(String(u)); throw new TypeError('offline'); };
+  await assert.rejects(foods.searchFoods('bananas', {}), /Barcode scanning still works/);
+  assert.equal(urls.length, 1);
+});
+globalThis.fetch = realFetch;
 
 // ---------- charts ----------
 test('charts', () => {

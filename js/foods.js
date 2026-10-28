@@ -1,8 +1,10 @@
 /**
- * MacroTally — food lookup (Open Food Facts, optional USDA FoodData Central) and portion scaling.
+ * MacroTally — food lookup (Open Food Facts, USDA FoodData Central), result ranking and portion scaling.
  * Food nutrients are always normalized to per 100 g.
  */
-import { uid } from './store.js';
+import { uid, state } from './store.js';
+import { config } from './config.js';
+import { builtinFoods } from './builtin.js';
 
 /** Grams unit. */
 export const UNIT_G = { label: 'g', grams: 1 };
@@ -33,7 +35,7 @@ function offSearchBase(region) {
   const code = String(region || '').toLowerCase();
   return REGIONS.some((r) => r.code === code) ? `https://${code}.openfoodfacts.org` : OFF_BASE;
 }
-const OFF_FIELDS = 'code,product_name,product_name_en,brands,serving_size,serving_quantity,nutriments,quantity';
+const OFF_FIELDS = 'code,product_name,product_name_en,brands,serving_size,serving_quantity,nutriments,quantity,unique_scans_n';
 const USDA_BASE = 'https://api.nal.usda.gov/fdc/v1/foods/search';
 const TIMEOUT_MS = 12000;
 
@@ -147,7 +149,8 @@ export function foodFromOFF(product) {
     brand,
     per100,
     servings,
-    defaultGrams: servingGrams || 100
+    defaultGrams: servingGrams || 100,
+    pop: num(product.unique_scans_n) ?? 0
   };
 }
 
@@ -233,17 +236,20 @@ async function fetchJSON(url, what) {
 }
 
 /**
- * Look up a barcode on Open Food Facts. Tries the code as-is, then without a leading 0 (EAN-13 → UPC-A),
- * then with a leading 0 (UPC-A → EAN-13).
- * @param {string} code
- * @returns {Promise<object|null>} Food or null when not found
+ * Effective USDA FoodData Central key: the user's own key from Settings (trimmed) when non-empty,
+ * else the shared deployment key from config.js ('' when neither is set).
+ * @param {object} [profile] defaults to state.profile
+ * @returns {string}
  */
-export async function lookupBarcode(code) {
-  const clean = String(code || '').replace(/\D/g, '');
-  if (!clean) throw new Error('Enter a valid barcode (digits only).');
-  const candidates = [clean];
-  if (clean.length === 13 && clean.startsWith('0')) candidates.push(clean.slice(1));
-  if (clean.length === 12) candidates.push('0' + clean);
+export function effectiveUsdaKey(profile = state.profile) {
+  const own = String((profile && profile.usdaKey) || '').trim();
+  return own || String(config.usdaApiKey || '').trim();
+}
+
+const stripZeros = (code) => String(code || '').replace(/\D/g, '').replace(/^0+/, '');
+
+/** Open Food Facts product lookup over the barcode variants. Returns Food or null; throws on network errors. */
+async function lookupOFF(candidates) {
   for (const c of candidates) {
     const data = await fetchJSON(`${OFF_BASE}/api/v2/product/${c}.json?fields=${OFF_FIELDS}`, 'Open Food Facts');
     if (data && data.product && (data.status === 1 || data.status === undefined || data.status === 'success')) {
@@ -254,52 +260,281 @@ export async function lookupBarcode(code) {
   return null;
 }
 
+/** USDA Branded lookup: accepts a result whose gtinUpc equals the code, ignoring leading zeros. Throws on errors. */
+async function lookupUSDABarcode(clean, key) {
+  const url = `${USDA_BASE}?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(clean)}&dataType=Branded&pageSize=5`;
+  const data = await fetchJSON(url, 'USDA FoodData Central');
+  const want = stripZeros(clean);
+  const hit = (data?.foods || []).find((it) => it && it.gtinUpc && stripZeros(it.gtinUpc) === want);
+  return hit ? foodFromUSDA(hit) : null;
+}
+
 /**
- * Search Open Food Facts (and USDA when usdaKey is given). USDA failures are swallowed;
- * an OFF failure is thrown only if USDA produced nothing. Results are de-duplicated by id.
- * Results come from the region's Open Food Facts site, ranked by scan popularity.
+ * Look up a barcode. Open Food Facts first: tries the code as-is, then without a leading 0 (EAN-13 → UPC-A),
+ * then with a leading 0 (UPC-A → EAN-13). When Open Food Facts has nothing (or cannot be reached) and a
+ * USDA key is given, falls back to USDA Branded foods matched on gtinUpc (leading zeros ignored).
+ * An Open Food Facts error is rethrown only when the USDA fallback did not find the product.
+ * @param {string} code
+ * @param {{usdaKey?: string}} [opts] pass effectiveUsdaKey() to enable the USDA fallback
+ * @returns {Promise<object|null>} Food or null when not found
+ */
+export async function lookupBarcode(code, { usdaKey = '' } = {}) {
+  const clean = String(code || '').replace(/\D/g, '');
+  if (!clean) throw new Error('Enter a valid barcode (digits only).');
+  const candidates = [clean];
+  if (clean.length === 13 && clean.startsWith('0')) candidates.push(clean.slice(1));
+  if (clean.length === 12) candidates.push('0' + clean);
+  let offErr = null;
+  try {
+    const food = await lookupOFF(candidates);
+    if (food) return food;
+  } catch (err) {
+    offErr = err;
+  }
+  const key = String(usdaKey || '').trim();
+  if (key) {
+    try {
+      const food = await lookupUSDABarcode(clean, key);
+      if (food) return food;
+    } catch {
+      // Swallowed: Open Food Facts is the primary source; its error (if any) is reported below.
+    }
+  }
+  if (offErr) throw offErr;
+  return null;
+}
+
+/**
+ * Search Open Food Facts and, when usdaKey is given, USDA FoodData Central in parallel.
+ * A source's failure is swallowed as long as the other produced results. When a source failed and
+ * nothing was found, the Open Food Facts error is thrown if it failed (else the USDA one).
+ * Live USDA results that duplicate a loaded built-in food (same `usda:<fdcId>` id) are dropped.
+ * Open Food Facts results come from the region's site, sorted there by scan popularity; callers re-rank
+ * with rankFoods. Searches where every source answered are cached for the session.
  * @param {string} query
- * @param {{usdaKey?:string, region?:string}} [opts]
- * @returns {Promise<object[]>} Foods
+ * @param {{usdaKey?:string, region?:string}} [opts] usdaKey: pass effectiveUsdaKey()
+ * @returns {Promise<object[]>} Foods, de-duplicated by id
  */
 export async function searchFoods(query, { usdaKey = '', region = 'world' } = {}) {
   const q = String(query || '').trim();
   if (q.length < 2) return [];
-  const cacheKey = `${region}|${usdaKey ? 'u' : '-'}|${q.toLowerCase()}`;
-  const cached = searchCache.get(cacheKey);
-  if (cached) return cached;
-  const results = await searchFoodsUncached(q, { usdaKey, region });
-  if (searchCache.size >= 60) searchCache.delete(searchCache.keys().next().value);
-  searchCache.set(cacheKey, results);
-  return results;
+  const key = String(usdaKey || '').trim();
+  const cacheKey = `${region}|${key ? 'u' : '-'}|${q.toLowerCase()}`;
+  let results = searchCache.get(cacheKey);
+  if (!results) {
+    const r = await searchFoodsUncached(q, { key, region });
+    results = r.foods;
+    if (r.complete) {
+      if (searchCache.size >= 60) searchCache.delete(searchCache.keys().next().value);
+      searchCache.set(cacheKey, results);
+    }
+  }
+  const builtinIds = new Set(builtinFoods().map((f) => f.id));
+  return results.filter((f) => f.source !== 'usda' || !builtinIds.has(f.id));
 }
 
-/** Session cache of search results, keyed by region + query, so retyping a query costs no request. */
+/** Session cache of search results, keyed by region + key presence + query, so retyping costs no request. */
 const searchCache = new Map();
 
-async function searchFoodsUncached(q, { usdaKey, region }) {
+const asError = (e) => (e instanceof Error ? e : new Error(String(e)));
+
+async function searchFoodsUncached(q, { key, region }) {
   const offUrl = `${offSearchBase(region)}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=25&sort_by=unique_scans_n&fields=${OFF_FIELDS}`;
   const offP = fetchJSON(offUrl, 'Open Food Facts').then((d) =>
     (d?.products || []).filter((p) => p && (p.product_name || p.product_name_en)).map(foodFromOFF).filter(Boolean)
   );
-  const key = String(usdaKey || '').trim();
   const usdaP = key
     ? fetchJSON(
-      `${USDA_BASE}?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=20&dataType=${encodeURIComponent('Foundation,SR Legacy,Branded')}`,
+      `${USDA_BASE}?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=25&dataType=${encodeURIComponent('Foundation,SR Legacy,Branded')}`,
       'USDA FoodData Central'
-    ).then((d) => (d?.foods || []).map(foodFromUSDA).filter(Boolean)).catch(() => [])
+    ).then((d) => (d?.foods || []).map(foodFromUSDA).filter(Boolean))
     : Promise.resolve([]);
   const [off, usda] = await Promise.allSettled([offP, usdaP]);
+  const offFoods = off.status === 'fulfilled' ? off.value : [];
   const usdaFoods = usda.status === 'fulfilled' ? usda.value : [];
-  if (off.status === 'rejected' && !usdaFoods.length) {
-    const err = off.reason instanceof Error ? off.reason : new Error(String(off.reason));
+  const failed = off.status === 'rejected' || usda.status === 'rejected';
+  if (failed && !offFoods.length && !usdaFoods.length) {
+    const err = asError(off.status === 'rejected' ? off.reason : usda.reason);
     if (!key) err.message += ' Barcode scanning still works, and a free USDA key in Settings adds a second search source.';
     throw err;
   }
-  const all = [...(off.status === 'fulfilled' ? off.value : []), ...usdaFoods];
   const seen = new Map();
-  for (const f of all) if (!seen.has(f.id)) seen.set(f.id, f);
-  return [...seen.values()];
+  for (const f of [...offFoods, ...usdaFoods]) if (!seen.has(f.id)) seen.set(f.id, f);
+  return { foods: [...seen.values()], complete: !failed };
+}
+
+/* ------------------------------------------------------------------ */
+/* Ranking                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Tokenize for matching: lowercase, drop apostrophes ("Bob's" → "bobs"), treat every other punctuation
+ * character as a separator, split on whitespace, drop empty tokens. Never throws (null → []).
+ * @param {*} s
+ * @returns {string[]}
+ */
+export function tokenize(s) {
+  if (s === null || s === undefined) return [];
+  return String(s).toLowerCase()
+    .replace(/['’`]/g, '')
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(stem);
+}
+
+/** Light plural stemming so "bananas" and "banana" (or "eggs"/"egg", "oats"/"oat") compare equal. */
+function stem(w) {
+  if (w.length > 3 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
+  if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') && !w.endsWith('us') && !w.endsWith('is')) return w.slice(0, -1);
+  return w;
+}
+
+/** Per-food token cache (keyed by object; food objects are not mutated while listed). */
+const tokenCache = new WeakMap();
+
+function foodTokens(food) {
+  let t = tokenCache.get(food);
+  if (!t) {
+    t = { name: tokenize(food.name), brand: tokenize(food.brand) };
+    tokenCache.set(food, t);
+  }
+  return t;
+}
+
+/**
+ * Score how well a food matches a query. 0 means no match; any positive number is a match (higher is better).
+ *
+ * With name = tokenize(food.name), brand = tokenize(food.brand), q = tokenize(query):
+ * - Empty q → 0.
+ * - Coverage, per query token: +3 when some name token starts with it (prefix); else +1.5 when a brand
+ *   token starts with it; else +0.5 when it appears inside a name token (substring); else it is a miss.
+ *   When no query token matches at all the food is not a match (0).
+ * - Phrase: +4 when food.name lowercased contains the whole trimmed lowercased query; +3 more when the
+ *   name starts with it.
+ * - Position: +2 when the first name token starts with the first query token.
+ * - Completeness: −3 when per100 cal, p, c and f are all 0; −1 when cal is 0 (an all-zero food gets both).
+ * - Length: −0.05 per name token beyond 6, so long USDA descriptions rank below short names at equal match.
+ * - Popularity: +0.8 × log10(1 + food.pop) (Open Food Facts scan count); +1.5 for built-in foods
+ *   (curated); +3 for library foods (id in localIds), +2 more for favorites, +1 more for recents.
+ * - Partial match (some query tokens missed): the total is multiplied by 0.25, so a typo in one word
+ *   still surfaces the food, well below full matches.
+ * A matched food whose penalties take the total to ≤ 0 scores 0.01, so 0 always means "no match".
+ * @param {string} query
+ * @param {object} food
+ * @param {{localIds?: Set<string>, favoriteIds?: Set<string>, recentIds?: Set<string>}} [opts]
+ * @returns {number}
+ */
+export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new Set(), recentIds = new Set() } = {}) {
+  const q = tokenize(query);
+  if (!q.length || !food || typeof food !== 'object') return 0;
+  const { name, brand } = foodTokens(food);
+  let score = 0;
+  let matched = 0;
+  let early = true; // every query word found within the first q.length + 1 name words
+  const window = name.slice(0, q.length + 1);
+  for (const t of q) {
+    if (name.includes(t)) score += 3.5; // whole word ("egg" in "Egg, whole") beats a prefix ("egg" in "Eggnog")
+    else if (name.some((w) => w.startsWith(t))) score += 3;
+    else if (brand.some((w) => w.startsWith(t))) score += 1.5;
+    else if (name.some((w) => w.includes(t))) score += 0.5;
+    else continue;
+    matched++;
+    if (!window.some((w) => w === t || w.startsWith(t))) early = false;
+  }
+  if (!matched) return 0;
+  // Whole-word phrase match on token-joined names, so USDA's comma style ("Chicken, breast, skinless")
+  // counts as "chicken breast". Worth more at the start of the name than buried in it
+  // ("Oil, olive" should not lose to "Mayonnaise, with olive oil").
+  const joined = ` ${name.join(' ')} `;
+  const phrase = ` ${q.join(' ')} `;
+  if (joined.startsWith(phrase)) score += 5.5;
+  else if (joined.includes(phrase)) score += 2;
+  if (early && matched === q.length) score += 2;
+  if (name.length && name[0].startsWith(q[0])) score += 1;
+  const n = food.per100 || {};
+  const cal = Number(n.cal) || 0;
+  if (!cal && !(Number(n.p) || 0) && !(Number(n.c) || 0) && !(Number(n.f) || 0)) score -= 3;
+  if (!cal) score -= 1;
+  // Shorter names win ties: each name word beyond the query's length costs a little.
+  if (name.length > q.length) score -= 0.15 * (name.length - q.length);
+  // Live results: each name word the query did not touch costs a little ("chicken breast sandwich"
+  // ranks under "chicken breast"). Built-in USDA names carry structured descriptors, so they are exempt
+  // and get a flat curated bonus instead.
+  if (food.source === 'builtin') {
+    score += 2;
+  } else {
+    const unmatched = name.filter((w) => !q.some((t) => w.startsWith(t) || w.includes(t))).length;
+    score -= 0.5 * unmatched;
+  }
+  const pop = Number(food.pop);
+  if (pop > 0) score += Math.log10(1 + pop) * 0.6;
+  if (localIds.has(food.id)) score += 3;
+  if (favoriteIds.has(food.id)) score += 2;
+  if (recentIds.has(food.id)) score += 1;
+  if (matched < q.length) score *= 0.25;
+  return score > 0 ? score : 0.01;
+}
+
+/** De-duplication key: the barcode (digits, leading zeros ignored) when present, else "name tokens|brand tokens". */
+function dedupKey(food) {
+  const bc = stripZeros(food.barcode);
+  if (bc) return `#${bc}`;
+  const { name, brand } = foodTokens(food);
+  return `${name.join(' ')}|${brand.join(' ')}`;
+}
+
+/**
+ * Rank and de-duplicate a mixed list of foods (library, built-in, USDA, Open Food Facts) for a query.
+ * Sorted by scoreFood, best first (ties keep input order). Foods sharing an id or a de-duplication key
+ * (barcode, else normalized name + brand) keep only the higher-scored one. Foods scoring 0 are kept,
+ * sorted last, because live sources also match on fields we do not see. Never throws on odd input.
+ * @param {string} query
+ * @param {object[]} foods
+ * @param {{limit?: number, localIds?: Set<string>, favoriteIds?: Set<string>, recentIds?: Set<string>}} [opts]
+ * @returns {object[]} Foods, at most `limit`
+ */
+export function rankFoods(query, foods, { limit = 40, localIds, favoriteIds, recentIds } = {}) {
+  const opts = { localIds: localIds || new Set(), favoriteIds: favoriteIds || new Set(), recentIds: recentIds || new Set() };
+  const scored = (Array.isArray(foods) ? foods : [])
+    .filter((f) => f && typeof f === 'object' && f.id)
+    .map((food, i) => ({ food, i, score: scoreFood(query, food, opts) }))
+    .sort((a, b) => b.score - a.score || a.i - b.i);
+  const seenIds = new Set();
+  const seenKeys = new Set();
+  const out = [];
+  for (const { food } of scored) {
+    const key = dedupKey(food);
+    if (seenIds.has(food.id) || seenKeys.has(key)) continue;
+    seenIds.add(food.id);
+    seenKeys.add(key);
+    out.push(food);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * Search the user's library and the built-in list synchronously (no network). Only matching foods
+ * (score > 0) are returned, ranked by rankFoods with the library / favorite / recent boosts.
+ * Never throws on odd input (empty or punctuation-only query → []).
+ * @param {string} query
+ * @param {{library?: object|object[], builtin?: object[], recents?: string[], favorites?: string[], limit?: number}} sources
+ *   library: state.foods (id → Food map) or an array of Foods; recents/favorites: food ids
+ * @returns {object[]} Foods
+ */
+export function searchLocal(query, { library = {}, builtin = [], recents = [], favorites = [], limit = 40 } = {}) {
+  if (!tokenize(query).length) return [];
+  const lib = (Array.isArray(library) ? library : Object.values(library || {}))
+    .filter((f) => f && typeof f === 'object' && f.id);
+  const opts = {
+    localIds: new Set(lib.map((f) => f.id)),
+    favoriteIds: new Set(Array.isArray(favorites) ? favorites : []),
+    recentIds: new Set(Array.isArray(recents) ? recents : [])
+  };
+  const pool = [...lib, ...(Array.isArray(builtin) ? builtin : [])]
+    .filter((f) => f && typeof f === 'object' && f.id && scoreFood(query, f, opts) > 0);
+  return rankFoods(query, pool, { ...opts, limit });
 }
 
 /**
