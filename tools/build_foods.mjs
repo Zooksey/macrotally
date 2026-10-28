@@ -228,6 +228,23 @@ function keepSr(desc, cat, names) {
 // ---------- Portions ----------
 
 /** @param {number} x */
+
+/** Everyday-name rewrites applied to output names so common searches hit ("oatmeal", not "Cereals, oats"). */
+const NAME_REWRITES = [
+  [/^Cereals, oats, regular and quick and instant, /i, 'Oatmeal, '],
+  [/^Cereals, oats, regular and quick, /i, 'Oatmeal, '],
+  [/^Cereals, oats, instant, fortified, plain, /i, 'Oatmeal, instant, plain, '],
+  [/^Cereals, whole wheat hot natural cereal, /i, 'Wheat hot cereal, '],
+  [/\s*\(includes boiling and microwaving\)/i, ''],
+  [/\s*\(boiling water added or microwaved\)/i, '']
+];
+/** @param {string} n */
+export function displayName(n) {
+  let out = n;
+  for (const [re, rep] of NAME_REWRITES) out = out.replace(re, rep);
+  return out;
+}
+
 const fmtAmount = (x) => (Number.isFinite(x) && x > 0 ? String(Math.round(x * 100) / 100) : '');
 
 /**
@@ -325,7 +342,7 @@ const missing = picked.filter((f) => !portionsById.has(f.id)).length;
 if (missing) console.warn(`  ${missing} foods missing from /foods responses (kept with no portions).`);
 
 let entries = picked.map((f) => {
-  const food = { id: `usda:${f.id}`, n: f.n, c: f.c, p100: f.p100, s: portionsById.get(f.id) || [] };
+  const food = { id: `usda:${f.id}`, n: displayName(f.n), c: f.c, p100: f.p100, s: portionsById.get(f.id) || [] };
   return { food, sr: f.sr, score: f.score, bytes: Buffer.byteLength(JSON.stringify(food)) + 1 };
 });
 

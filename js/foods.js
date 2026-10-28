@@ -384,6 +384,15 @@ export function tokenize(s) {
 }
 
 /** Light plural stemming so "bananas" and "banana" (or "eggs"/"egg", "oats"/"oat") compare equal. */
+/** Query-word synonyms (stemmed form → stemmed alternatives) bridging everyday names and USDA naming. */
+const SYNONYMS = {
+  oatmeal: ['oat'], porridge: ['oat'], yoghurt: ['yogurt'], chickpea: ['garbanzo'], garbanzo: ['chickpea'],
+  cilantro: ['coriander'], scallion: ['onion'], zucchini: ['squash'], courgette: ['squash', 'zucchini'],
+  aubergine: ['eggplant'], prawn: ['shrimp'], mince: ['ground'], minced: ['ground'], soda: ['carbonated'],
+  pop: ['carbonated'], hamburger: ['beef', 'ground'], steak: ['beef'], bacon: ['pork'], ham: ['pork'],
+  turkey: ['turkey'], pb: ['peanut'], oj: ['orange'], rotisserie: ['chicken', 'roasted']
+};
+
 function stem(w) {
   if (w.length > 3 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
   if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') && !w.endsWith('us') && !w.endsWith('is')) return w.slice(0, -1);
@@ -433,14 +442,17 @@ export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new
   let matched = 0;
   let early = true; // every query word found within the first q.length + 1 name words
   const window = name.slice(0, q.length + 1);
-  for (const t of q) {
-    if (name.includes(t)) score += 3.5; // whole word ("egg" in "Egg, whole") beats a prefix ("egg" in "Eggnog")
-    else if (name.some((w) => w.startsWith(t))) score += 3;
-    else if (brand.some((w) => w.startsWith(t))) score += 1.5;
-    else if (name.some((w) => w.includes(t))) score += 0.5;
+  for (const t0 of q) {
+    // A query word also matches its synonyms ("oatmeal" finds USDA's "Cereals, oats, …").
+    const alts = [t0, ...(SYNONYMS[t0] || [])];
+    const hit = (test) => alts.some(test);
+    if (hit((t) => name.includes(t))) score += 3.5; // whole word ("egg" in "Egg, whole") beats a prefix ("egg" in "Eggnog")
+    else if (hit((t) => name.some((w) => w.startsWith(t)))) score += 3;
+    else if (hit((t) => brand.some((w) => w.startsWith(t)))) score += 1.5;
+    else if (hit((t) => name.some((w) => w.includes(t)))) score += 0.5;
     else continue;
     matched++;
-    if (!window.some((w) => w === t || w.startsWith(t))) early = false;
+    if (!hit((t) => window.some((w) => w === t || w.startsWith(t)))) early = false;
   }
   if (!matched) return 0;
   // Whole-word phrase match on token-joined names, so USDA's comma style ("Chicken, breast, skinless")
