@@ -15,6 +15,7 @@ const calc = await import('../js/calc.js');
 const foods = await import('../js/foods.js');
 const charts = await import('../js/charts.js');
 const builtin = await import('../js/builtin.js');
+const packs = await import('../js/packs.js');
 const { config } = await import('../js/config.js');
 
 let passed = 0;
@@ -297,6 +298,140 @@ test('makeCustomFood per-serving → per-100g', () => {
   assert.throws(() => foods.makeCustomFood({ name: 'X', per: 'serving', servingGrams: 0, cal: 1, p: 0, c: 0, f: 0 }));
 });
 
+// ---------- food packs / servingOnly foods ----------
+const TB = { id: 'taco-bell', name: 'Taco Bell', brand: 'Taco Bell' };
+const packText = (extra = {}) => JSON.stringify({
+  format: 'macrotally-pack/1', id: 'test-pack', name: 'Test Diner', brand: 'Test Diner',
+  source: 'https://example.com', generated: '2026-10-28',
+  foods: [
+    { id: '1', n: 'Big Burger', cat: 'Burgers', s: ['1 burger', null], v: [600, 30, 45, 32, 2] },
+    { id: 2, n: 'Side Salad', s: ['1 salad', 120], v: [60, 2, 8, 3] },
+    { id: '3', n: 'Bad', s: ['1 x', null], v: [1, 2, 'x', 4] },
+    { id: '4', n: 'Negative', v: [1, -2, 3, 4] },
+    { n: 'No id', v: [1, 2, 3, 4] },
+    { id: '1', n: 'Duplicate', v: [1, 2, 3, 4] }
+  ],
+  ...extra
+});
+
+test('packFoodToFood: null grams → servingOnly (per100 = one serving); grams → per 100 g', () => {
+  const f = packs.packFoodToFood(TB, { id: '166727', n: 'Burrito Supreme - Beef', cat: 'Burritos', s: ['1 burrito', null], v: [390, 16, 52, 14, 8] });
+  assert.deepEqual(f, {
+    id: 'pack:taco-bell:166727', source: 'pack', packId: 'taco-bell', barcode: null,
+    name: 'Burrito Supreme - Beef', brand: 'Taco Bell', category: 'Burritos', servingOnly: true,
+    per100: { cal: 390, p: 16, c: 52, f: 14, fiber: 8 },
+    servings: [{ label: '1 burrito', grams: 100 }], defaultGrams: 100
+  });
+  const g = packs.packFoodToFood(TB, { id: '9', n: 'Nachos', s: ['1 order', 150], v: [390, 16, 52, 14, 8] });
+  assert.equal(g.servingOnly, undefined);
+  assert.deepEqual(g.per100, { cal: 260, p: 10.67, c: 34.67, f: 9.33, fiber: 5.33 });
+  assert.deepEqual(g.servings, [{ label: '1 order (150 g)', grams: 150 }]);
+  assert.equal(g.defaultGrams, 150);
+  assert.equal(g.category, '');
+  const h = packs.packFoodToFood(TB, { id: '10', n: 'No serving', v: [100, 1, 2, 3] });
+  assert.deepEqual(h.servings, [{ label: '1 serving', grams: 100 }]);
+  assert.equal(h.per100.fiber, 0);
+  assert.equal(packs.packFoodToFood(TB, { id: '11', n: 'Bad', v: [1, 2, 3] }), null);
+  assert.equal(packs.packFoodToFood(TB, { n: 'No id', v: [1, 2, 3, 4] }), null);
+});
+
+test('unitOptions / buildEntry for servingOnly foods: servings only, entry carries servingOnly', () => {
+  const f = packs.packFoodToFood(TB, { id: '1', n: 'Crunchy Taco', s: ['1 taco', null], v: [170, 8, 13, 10, 3] });
+  const units = foods.unitOptions(f);
+  assert.deepEqual(units, [{ label: '1 taco', grams: 100 }]);
+  assert.ok(!units.some((u) => u.label === 'g' || u.label === 'oz'));
+  const e = foods.buildEntry(f, 2, units[0]);
+  assert.equal(e.servingOnly, true);
+  assert.equal(e.cal, 340);
+  assert.equal(e.p, 16);
+  assert.equal(e.grams, 200);
+  const normal = { id: 'x', name: 'X', per100: { cal: 100, p: 1, c: 1, f: 1, fiber: 0 }, servings: [{ label: '1 cup (40 g)', grams: 40 }] };
+  assert.equal(foods.buildEntry(normal, 1, normal.servings[0]).servingOnly, undefined);
+  assert.deepEqual(foods.unitOptions(normal).map((u) => u.label), ['1 cup (40 g)', 'g', 'oz']);
+});
+
+test('makeCustomFood per serving without grams → servingOnly food', () => {
+  const f = foods.makeCustomFood({ name: 'Diner pancakes', per: 'serving', servingGrams: null, servingLabel: '1 stack', cal: 520, p: 12, c: 80, f: 16, fiber: 2 });
+  assert.equal(f.servingOnly, true);
+  assert.deepEqual(f.per100, { cal: 520, p: 12, c: 80, f: 16, fiber: 2 });
+  assert.deepEqual(f.servings, [{ label: '1 stack', grams: 100 }]);
+  assert.equal(f.defaultGrams, 100);
+  assert.equal(f.source, 'custom');
+  const g = foods.makeCustomFood({ name: 'Mystery', per: 'serving', servingGrams: '', servingLabel: '', cal: 100, p: 0, c: 0, f: 0 });
+  assert.equal(g.servingOnly, true);
+  assert.equal(g.servings[0].label, '1 serving');
+  assert.deepEqual(foods.unitOptions(g), [{ label: '1 serving', grams: 100 }]);
+  // per 100 g without grams is unchanged: a normal food with no servings.
+  const h = foods.makeCustomFood({ name: 'Flour', per: '100g', cal: 364, p: 10, c: 76, f: 1 });
+  assert.equal(h.servingOnly, undefined);
+  assert.deepEqual(h.servings, []);
+  assert.equal(h.per100.cal, 364);
+  assert.throws(() => foods.makeCustomFood({ name: 'X', per: 'serving', servingGrams: -5, cal: 1, p: 0, c: 0, f: 0 }));
+});
+
+test('importPack: rejects bad input, stores a good pack (valid foods only), removePack', () => {
+  store.resetAll();
+  assert.throws(() => packs.importPack('not json'), /not valid JSON/);
+  assert.throws(() => packs.importPack(packText({ format: 'macrotally-pack/2' })), /Not a MacroTally food pack/);
+  assert.throws(() => packs.importPack(JSON.stringify([1, 2])), /Not a MacroTally food pack/);
+  assert.throws(() => packs.importPack(packText({ name: '' })), /no id or name/);
+  assert.throws(() => packs.importPack(packText({ id: 'Bad Id!' })), /lowercase/);
+  assert.throws(() => packs.importPack(packText({ foods: 'nope' })), /no foods/);
+  assert.throws(() => packs.importPack(packText({ foods: [{ id: '1', n: 'X', v: [1, 2] }] })), /no valid foods/);
+  assert.deepEqual(store.state.packs, {}, 'nothing stored on failure');
+  const r = packs.importPack(packText());
+  assert.deepEqual(r, { id: 'test-pack', name: 'Test Diner', count: 2 });
+  assert.equal(store.state.packs['test-pack'].foods.length, 2);
+  const saved = JSON.parse(globalThis.localStorage.getItem(store.STORAGE_KEY));
+  assert.equal(saved.packs['test-pack'].name, 'Test Diner', 'saved to storage');
+  const pf = packs.packFoods();
+  assert.deepEqual(pf.map((f) => f.id), ['pack:test-pack:1', 'pack:test-pack:2']);
+  assert.equal(pf[0].servingOnly, true);
+  assert.equal(pf[1].per100.cal, 50);
+  assert.deepEqual(packs.listPacks(), [{ id: 'test-pack', name: 'Test Diner', count: 2, generated: '2026-10-28', bundled: false }]);
+  // Re-import replaces the older copy.
+  packs.importPack(packText({ name: 'Test Diner v2', foods: [{ id: '7', n: 'Shake', s: ['1 shake', null], v: [500, 10, 70, 20, 0] }] }));
+  assert.deepEqual(packs.packFoods().map((f) => f.id), ['pack:test-pack:7']);
+  assert.equal(packs.listPacks()[0].name, 'Test Diner v2');
+  // Pack foods are found by brand + name.
+  const hits = foods.searchLocal('test diner shake', { library: {}, builtin: packs.packFoods() });
+  assert.deepEqual(hits.map((f) => f.id), ['pack:test-pack:7']);
+  assert.equal(packs.removePack('test-pack'), true);
+  assert.equal(packs.removePack('test-pack'), false);
+  assert.deepEqual(packs.packFoods(), []);
+  assert.deepEqual(packs.listPacks(), []);
+});
+
+test('scoreFood: pack foods get the same curated bonus as built-in foods', () => {
+  const base = { name: 'Burrito Supreme', brand: 'Taco Bell', per100: { cal: 390, p: 16, c: 52, f: 14 } };
+  const pack = foods.scoreFood('taco bell burrito', { ...base, id: 'pack:a:1', source: 'pack' });
+  const off = foods.scoreFood('taco bell burrito', { ...base, id: 'off:1', source: 'off' });
+  const bi = foods.scoreFood('burrito', { ...base, id: 'b', source: 'builtin' });
+  assert.ok(pack > off, `${pack} > ${off}`);
+  assert.equal(foods.scoreFood('burrito', { ...base, id: 'pack:a:1', source: 'pack' }), bi);
+});
+
+test('store: packs default + merge; backup restore takes packs from the backup, else keeps them', () => {
+  store.resetAll();
+  assert.deepEqual(store.state.packs, {});
+  store.replaceState({ packs: 'junk' });
+  assert.deepEqual(store.state.packs, {});
+  packs.importPack(packText());
+  const backup = store.exportJSON();
+  assert.ok(JSON.parse(backup).packs['test-pack'], 'backups carry user packs');
+  store.resetAll();
+  assert.deepEqual(packs.packFoods(), [], 'state swap is picked up');
+  store.importJSON(backup);
+  assert.equal(packs.packFoods().length, 2);
+  // An old backup without packs keeps this device's packs.
+  store.importJSON(JSON.stringify({ version: 1, diary: {} }));
+  assert.ok(store.state.packs['test-pack']);
+  // A backup with an empty packs object restores exactly that.
+  store.importJSON(JSON.stringify({ version: 1, diary: {}, packs: {} }));
+  assert.deepEqual(store.state.packs, {});
+  store.resetAll();
+});
+
 // ---------- search: ranking ----------
 test('tokenize', () => {
   assert.deepEqual(foods.tokenize('Chicken, breast (raw)!'), ['chicken', 'breast', 'raw']);
@@ -519,6 +654,51 @@ await testAsync('searchFoods: parallel sources, built-in duplicates dropped, fai
   globalThis.fetch = async (u) => { urls.push(String(u)); throw new TypeError('offline'); };
   await assert.rejects(foods.searchFoods('bananas', {}), /Barcode scanning still works/);
   assert.equal(urls.length, 1);
+});
+await testAsync('loadPacks: failures never throw (and retry), 404 → zero bundled foods, bundled + user override', async () => {
+  store.resetAll();
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    globalThis.fetch = async () => { throw new TypeError('offline'); };
+    assert.deepEqual(await packs.loadPacks(), []);
+    assert.equal(packs.packsLoaded(), false, 'failed load can retry');
+    const urls = [];
+    globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes(null, 404); };
+    assert.deepEqual(await packs.loadPacks(), []);
+    assert.equal(packs.packsLoaded(), true);
+    assert.ok(urls[0].endsWith('/data/packs/index.json'), urls[0]);
+    assert.deepEqual(packs.listPacks(), []);
+    // The index lists a pack that is present and one that is missing (404).
+    const tb = {
+      format: 'macrotally-pack/1', id: 'taco-bell', name: 'Taco Bell', brand: 'Taco Bell', generated: '2026-10-28',
+      foods: [{ id: '166727', n: 'Burrito Supreme - Beef', cat: 'Burritos', s: ['1 burrito', null], v: [390, 16, 52, 14, 8] }, { id: 'x', n: 'Broken' }]
+    };
+    urls.length = 0;
+    globalThis.fetch = async (u) => {
+      urls.push(String(u));
+      if (String(u).endsWith('/index.json')) return jsonRes({ packs: ['taco-bell.json', 'missing.json'] });
+      if (String(u).endsWith('/taco-bell.json')) return jsonRes(tb);
+      return jsonRes(null, 404);
+    };
+    const list = await packs.loadPacks({ reload: true });
+    assert.ok(urls.some((u) => u.endsWith('/data/packs/taco-bell.json')), urls.join(' '));
+    assert.deepEqual(list.map((f) => f.id), ['pack:taco-bell:166727']);
+    assert.equal(packs.packFoods(), list);
+    assert.deepEqual(packs.listPacks(), [{ id: 'taco-bell', name: 'Taco Bell', count: 1, generated: '2026-10-28', bundled: true }]);
+    await packs.loadPacks();
+    packs.preloadPacks();
+    assert.equal(urls.length, 3, 'loads once');
+    // A user pack with the same id overrides the bundled one; removing it brings the bundled one back.
+    packs.importPack(packText({ id: 'taco-bell', name: 'My Taco Bell' }));
+    assert.deepEqual(packs.listPacks().map((p) => [p.name, p.bundled]), [['My Taco Bell', false]]);
+    assert.deepEqual(packs.packFoods().map((f) => f.id), ['pack:taco-bell:1', 'pack:taco-bell:2']);
+    packs.removePack('taco-bell');
+    assert.deepEqual(packs.packFoods().map((f) => f.id), ['pack:taco-bell:166727']);
+  } finally {
+    console.warn = origWarn;
+    store.resetAll();
+  }
 });
 globalThis.fetch = realFetch;
 

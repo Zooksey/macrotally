@@ -85,6 +85,8 @@ export function defaults() {
     recents: [],
     favorites: [],
     meals: ['Breakfast', 'Lunch', 'Dinner', 'Snacks'],
+    // User-imported food packs (raw macrotally-pack/1 JSON keyed by pack id); see js/packs.js.
+    packs: {},
     // Google Drive backup connection. Belongs to this device: kept as-is when a backup is imported.
     drive: {
       connected: false,
@@ -114,6 +116,7 @@ function merge(obj) {
   if (!Array.isArray(out.meals) || !out.meals.length) out.meals = d.meals;
   if (!isObj(out.foods)) out.foods = {};
   if (!isObj(out.diary)) out.diary = {};
+  if (!isObj(out.packs)) out.packs = {};
   return out;
 }
 
@@ -183,7 +186,9 @@ export function exportJSON() {
 
 /**
  * Restore a backup produced by exportJSON(). This device's state.drive block is kept
- * (the Drive connection belongs to the device, not to the backup).
+ * (the Drive connection belongs to the device, not to the backup). The backup's imported food
+ * packs (state.packs) are restored when it has them; an older backup without a packs object keeps
+ * the packs already on this device.
  * @param {string} text
  * @throws {Error} 'Not a MacroTally backup' when the JSON is invalid or lacks diary/version.
  * @returns {void}
@@ -197,8 +202,10 @@ export function importJSON(text) {
   }
   if (!obj || typeof obj !== 'object' || !obj.diary || !obj.version) throw new Error('Not a MacroTally backup');
   const keep = state.drive;
+  const keepPacks = state.packs;
   replaceState(obj);
   state.drive = keep;
+  if (!isObj(obj.packs) && isObj(keepPacks)) state.packs = keepPacks;
   save();
 }
 

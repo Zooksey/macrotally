@@ -9,6 +9,7 @@ import { settingsView } from './views/settings.js';
 import { openSetup } from './modals/setup.js';
 import { autoBackupIfDue } from './drive.js';
 import { preloadBuiltinFoods } from './builtin.js';
+import { preloadPacks } from './packs.js';
 import { registerAppUpdates, applyUpdate } from './update.js';
 import './modals/food.js';
 
@@ -101,6 +102,7 @@ on('app-update', () => applyUpdate());
 
 function start() {
   preloadBuiltinFoods(); // fire-and-forget; never throws
+  preloadPacks(); // fire-and-forget; never throws
   try {
     refreshExpenditure(state);
     save();

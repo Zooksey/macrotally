@@ -1,10 +1,11 @@
-// MacroTally — Settings view: profile, food sources, meals, install, Google Drive backup, backup, about.
+// MacroTally — Settings view: profile, food sources, food packs, meals, install, Google Drive backup, backup, about.
 import { state, save, todayStr, exportJSON, importJSON, resetAll } from '../store.js';
 import { refreshExpenditure } from '../calc.js';
 import { REGIONS } from '../foods.js';
 import { esc, fmt, parseNum, on, toast, requestRender, confirmDialog } from '../ui.js';
 import { nav } from '../app.js';
 import { openSetup } from '../modals/setup.js';
+import { listPacks, importPack, removePack, loadPacks, packsLoaded } from '../packs.js';
 import { driveConfigured, loadGIS, connectDrive, disconnectDrive, backupNow, fetchBackup, applyBackup } from '../drive.js';
 
 import { APP_VERSION, checkForUpdate, updateAvailable } from '../update.js';
@@ -99,6 +100,34 @@ function installCard() {
       <p class="small"><strong>Android (Chrome):</strong> open the browser menu (⋮), then <em>Install app</em> or <em>Add to Home screen</em>.</p>`;
   }
   return `<section class="card"><h2>Install</h2>${body}</section>`;
+}
+
+/** "Food packs" card: bundled and imported restaurant menus, plus the import button. */
+function packsCard() {
+  if (!packsLoaded()) {
+    // Bundled packs load in the background; re-render once (only if that load succeeds, so no retry loop).
+    loadPacks().then(() => {
+      if (packsLoaded() && nav.tab === 'settings') requestRender();
+    });
+  }
+  const packs = listPacks();
+  const rows = packs.map((pk) => `
+      <div class="pack-row">
+        <div class="pack-main">
+          <div class="pack-name">${esc(pk.name)}</div>
+          <div class="muted small">${esc(plural(pk.count, 'item'))}${pk.generated ? ` · updated ${esc(pk.generated)}` : ''}${pk.bundled ? ' · built in' : ''}</div>
+        </div>
+        ${pk.bundled ? '' : `<button type="button" class="btn btn-ghost btn-ghost-danger" data-action="remove-pack" data-id="${esc(pk.id)}">Remove</button>`}
+      </div>`).join('');
+  return `
+    <section class="card">
+      <h2>Food packs</h2>
+      ${packs.length ? `<div class="pack-list">${rows}</div>` : '<p class="muted small">No food packs yet.</p>'}
+      <label class="btn btn-ghost btn-block file-btn">Import food pack
+        <input class="visually-hidden" type="file" accept=".json,application/json" data-change="import-pack">
+      </label>
+      <p class="hint">A pack is a JSON file of menu items (see README). Imported packs are stored on this device and included in backups.</p>
+    </section>`;
 }
 
 function plural(n, one, many = `${one}s`) {
@@ -213,6 +242,8 @@ export function settingsView() {
       <p class="hint">USDA adds generic foods (fruit, meat, rice…) and US branded products to search and barcode lookups. The shared key has an hourly limit for everyone; a free key of your own from <a href="https://fdc.nal.usda.gov/api-key-signup" target="_blank" rel="noopener noreferrer">fdc.nal.usda.gov</a> avoids it.</p>
       <button type="submit" class="btn btn-primary btn-block">Save food sources</button>
     </form>
+
+    ${packsCard()}
 
     <form class="card" data-submit="save-meals">
       <h2>Meals</h2>
@@ -375,6 +406,39 @@ on('import-file', async (el) => {
   toast('Backup restored');
   requestRender();
   if (!state.onboarded) openSetup();
+});
+
+on('import-pack', async (el) => {
+  const file = el.files && el.files[0];
+  if (!file) return;
+  let text;
+  try {
+    text = await readFileText(file);
+  } catch (err) {
+    toast(err && err.message ? err.message : 'Could not read that file', { kind: 'error' });
+    return;
+  } finally {
+    el.value = '';
+  }
+  try {
+    const { name, count } = importPack(text);
+    toast(`Imported ${name} (${plural(count, 'item')})`);
+  } catch (err) {
+    toast(err && err.message ? err.message : 'Not a MacroTally food pack', { kind: 'error' });
+    return;
+  }
+  requestRender();
+});
+
+on('remove-pack', async (el) => {
+  const id = el.dataset.id;
+  const pk = listPacks().find((x) => x.id === id && !x.bundled);
+  if (!pk) return;
+  const ok = await confirmDialog(`Remove the "${pk.name}" food pack? Foods you already logged are kept.`, { okLabel: 'Remove', danger: true });
+  if (!ok) return;
+  removePack(id);
+  toast(`Removed ${pk.name}`);
+  requestRender();
 });
 
 on('erase-all', async () => {

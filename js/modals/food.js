@@ -5,6 +5,7 @@ import {
   nutrientsFor, unitOptions, buildEntry, makeCustomFood
 } from '../foods.js';
 import { builtinFoods, loadBuiltinFoods } from '../builtin.js';
+import { packFoods, loadPacks } from '../packs.js';
 import { startScanner, scannerSupported } from '../scanner.js';
 import {
   esc, fmt, fmtQty, parseNum, icon, on, openModal, closeModal, closeAllModals,
@@ -43,8 +44,32 @@ function isFavorite(id) {
 }
 
 function servingHint(food) {
+  if (food.servingOnly) return '';
   const s = food.servings && food.servings[0];
   return s ? ` · ${esc(s.label)}` : '';
+}
+
+/** Serving label of a servingOnly food ("1 burrito"), or '' for normal foods. */
+function servingOnlyLabel(food) {
+  if (!food || !food.servingOnly) return '';
+  const s = food.servings && food.servings[0];
+  return (s && String(s.label || '').trim()) || '1 serving';
+}
+
+/** Calories line for a result row: "390 kcal / burrito" (servingOnly) or "120 kcal / 100 g". */
+function kcalText(food) {
+  const per = food.per100 || {};
+  const label = servingOnlyLabel(food);
+  if (!label) return `${fmt(per.cal)} kcal / 100 g`;
+  return `${fmt(per.cal)} kcal / ${esc(label.replace(/^1\s+/, ''))}`;
+}
+
+/** Small source badge for library rows. */
+function sourceBadge(food) {
+  if (food.source === 'custom') return '<span class="badge">Custom</span>';
+  if (food.source === 'usda' || food.source === 'builtin') return '<span class="badge">USDA</span>';
+  if (food.source === 'pack') return `<span class="badge">${esc(food.brand || 'Menu')}</span>`;
+  return '';
 }
 
 /**
@@ -55,21 +80,17 @@ function foodRow(food, tag) {
   foodCache.set(food.id, food);
   let marks;
   if (tag === undefined) {
-    const badge = food.source === 'custom'
-      ? '<span class="badge">Custom</span>'
-      : food.source === 'usda' || food.source === 'builtin' ? '<span class="badge">USDA</span>' : '';
-    marks = `${badge}${isFavorite(food.id) ? `<span class="fav-mark" aria-label="Favorite">${icon('star', 'icon-sm')}</span>` : ''}`;
+    marks = `${sourceBadge(food)}${isFavorite(food.id) ? `<span class="fav-mark" aria-label="Favorite">${icon('star', 'icon-sm')}</span>` : ''}`;
   } else if (tag === '★') {
     marks = `<span class="tag tag-fav" aria-label="Favorite" title="Favorite">${esc(tag)}</span>`;
   } else {
     marks = tag ? `<span class="tag">${esc(tag)}</span>` : '';
   }
-  const per = food.per100 || {};
   return `
     <button type="button" class="row" data-action="pick-food" data-id="${esc(food.id)}">
       <div class="row-main">
         <div class="row-title">${esc(food.name || 'Unnamed food')} ${marks}</div>
-        <div class="row-sub">${food.brand ? `${esc(food.brand)} · ` : ''}${fmt(per.cal)} kcal / 100 g${servingHint(food)}</div>
+        <div class="row-sub">${food.brand ? `${esc(food.brand)} · ` : ''}${kcalText(food)}${servingHint(food)}</div>
       </div>
       <span class="chev">${icon('right')}</span>
     </button>`;
@@ -101,7 +122,7 @@ function rankOpts() {
   };
 }
 
-/** Instant, offline results: library + built-in list (or a library barcode match for a typed barcode). */
+/** Instant, offline results: library + built-in list + food packs (or a library barcode match for a typed barcode). */
 function localResults(q) {
   if (isBarcodeQuery(q)) {
     const f = localByBarcode(q);
@@ -109,16 +130,20 @@ function localResults(q) {
   }
   return searchLocal(q, {
     library: state.foods,
-    builtin: builtinFoods(),
+    builtin: [...builtinFoods(), ...packFoods()],
     recents: state.recents,
     favorites: state.favorites,
     limit: 25
   });
 }
 
-/** Search result tag: ★ (favorite) or "library" for library foods, "USDA" for built-in and live USDA, none for Open Food Facts. */
+/**
+ * Search result tag: ★ (favorite) or "library" for library foods, "USDA" for built-in and live USDA,
+ * "menu" for food-pack items (their brand is already in the row), none for Open Food Facts.
+ */
 function resultTag(food) {
   if (state.foods && state.foods[food.id]) return isFavorite(food.id) ? '★' : 'library';
+  if (food.source === 'pack') return 'menu';
   return food.source === 'builtin' || food.source === 'usda' ? 'USDA' : '';
 }
 
@@ -263,6 +288,10 @@ function queueSearch(el, immediate) {
       if (list.length && seq === searchSeq && sheet.isConnected && sheet._search) renderSearch(sheet);
     });
   }
+  const packCount = packFoods().length;
+  loadPacks().then((list) => {
+    if (list.length !== packCount && seq === searchSeq && sheet.isConnected && sheet._search) renderSearch(sheet);
+  });
   const go = () => runSearch(sheet, q, seq);
   if (immediate) go();
   else searchTimer = setTimeout(go, 650); // Open Food Facts allows ~10 searches/min, so wait for typing to settle
@@ -317,8 +346,9 @@ function qtyDigits(unit) {
 
 function previewHtml(food, grams) {
   const n = nutrientsFor(food, grams);
+  const gramsText = food.servingOnly ? '' : ` <span class="muted small">· ${fmt(grams)} g</span>`;
   return `
-    <div class="preview-cal"><span class="big-num">${fmt(n.cal)}</span> <span class="muted">kcal</span> <span class="muted small">· ${fmt(grams)} g</span></div>
+    <div class="preview-cal"><span class="big-num">${fmt(n.cal)}</span> <span class="muted">kcal</span>${gramsText}</div>
     <div class="preview-macros">
       <div class="pm"><span class="pm-val" style="color:var(--p)">${fmt(n.p, 1)}</span><span class="muted small">Protein</span></div>
       <div class="pm"><span class="pm-val" style="color:var(--c)">${fmt(n.c, 1)}</span><span class="muted small">Carbs</span></div>
@@ -394,7 +424,7 @@ export function openFoodDetail(food, { meal, date, entry = null }) {
           ${meals.map((m) => `<option value="${esc(m)}"${m === curMeal ? ' selected' : ''}>${esc(m)}</option>`).join('')}
         </select>
       </label>
-      <p class="muted small per100">Per 100 g: ${fmt(per.cal)} kcal · P ${fmt(per.p, 1)} · C ${fmt(per.c, 1)} · F ${fmt(per.f, 1)}${per.fiber ? ` · Fiber ${fmt(per.fiber, 1)}` : ''}</p>
+      <p class="muted small per100">Per ${esc(servingOnlyLabel(food) || '100 g')}: ${fmt(per.cal)} kcal · P ${fmt(per.p, 1)} · C ${fmt(per.c, 1)} · F ${fmt(per.f, 1)}${per.fiber ? ` · Fiber ${fmt(per.fiber, 1)}` : ''}</p>
       ${food.source === 'custom' && !food._snapshot ? `<button type="button" class="link-btn" data-action="detail-edit-food">${icon('edit', 'icon-sm')} Edit food</button>` : ''}
       ${food.barcode ? `<p class="muted small">Barcode ${esc(food.barcode)}</p>` : ''}
       <div class="btn-row">
@@ -470,7 +500,8 @@ on('detail-save', (form) => {
   const meal = form.meal.value || ctx.meal;
   const { food, date, entry } = ctx;
   if (entry) {
-    updateEntry(date, entry.id, { ...buildEntry(food, qty, unit), meal });
+    // servingOnly: undefined clears a stale flag when the food has since gained a gram weight.
+    updateEntry(date, entry.id, { servingOnly: undefined, ...buildEntry(food, qty, unit), meal });
     closeAllModals();
     toast('Saved');
   } else {
@@ -514,9 +545,11 @@ function num1(v) {
  */
 export function openCustomFood({ barcode = null, food = null, meal, date, entry = null, name = '', replace = null } = {}) {
   const s = food && food.servings && food.servings[0];
+  // servingOnly foods: per100 already holds one serving of unknown weight, so grams stay blank.
+  const servingOnly = !!(food && food.servingOnly);
   // New foods default to "per serving" (how labels are printed); existing ones without a serving are per 100 g.
   const per = !food || s ? 'serving' : '100g';
-  const factor = s ? s.grams / 100 : 1;
+  const factor = s && !servingOnly ? s.grams / 100 : 1;
   const p100 = (food && food.per100) || {};
   const val = (k) => (food ? num1((p100[k] || 0) * factor) : '');
   const servingLabel = s ? String(s.label).replace(/\s*\([\d.,]+\s*g\)\s*$/i, '') : '1 serving';
@@ -533,8 +566,9 @@ export function openCustomFood({ barcode = null, food = null, meal, date, entry 
       </div>
       <div class="field-row">
         <label class="field"><span>Serving label</span><input name="servingLabel" type="text" autocomplete="off" value="${esc(servingLabel)}"></label>
-        <label class="field"><span>Serving size (g)</span><input name="servingGrams" type="text" inputmode="decimal" autocomplete="off" value="${esc(s ? num1(s.grams) : '')}"></label>
+        <label class="field"><span>Serving size (g)</span><input name="servingGrams" type="text" inputmode="decimal" autocomplete="off" value="${esc(s && !servingOnly ? num1(s.grams) : '')}" placeholder="optional"></label>
       </div>
+      <p class="hint">Serving size (g): leave blank if unknown; amounts are then logged in servings.</p>
       <div class="field"><span>Nutrition is per</span>
         <div class="segmented radio-seg">
           <label class="seg"><input type="radio" name="per" value="serving"${per === 'serving' ? ' checked' : ''}><span>Serving</span></label>
@@ -570,13 +604,9 @@ on('custom-save', (form) => {
   }
   const perEl = form.querySelector('input[name="per"]:checked');
   const per = perEl && perEl.value === '100g' ? '100g' : 'serving';
-  const servingGrams = parseNum(form.servingGrams.value);
-  if (per === 'serving' && !(servingGrams > 0)) {
-    toast('Enter the serving size in grams', { kind: 'error' });
-    form.servingGrams.focus();
-    return;
-  }
-  if (form.servingGrams.value.trim() !== '' && !(servingGrams > 0)) {
+  const gramsBlank = form.servingGrams.value.trim() === '';
+  const servingGrams = gramsBlank ? null : parseNum(form.servingGrams.value);
+  if (!gramsBlank && !(servingGrams > 0)) {
     toast('Serving size must be a positive number', { kind: 'error' });
     return;
   }

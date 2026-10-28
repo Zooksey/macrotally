@@ -1,6 +1,7 @@
 /**
  * MacroTally — food lookup (Open Food Facts, USDA FoodData Central), result ranking and portion scaling.
- * Food nutrients are always normalized to per 100 g.
+ * Food nutrients are always normalized to per 100 g, except `servingOnly` foods (restaurant items with no
+ * known weight): their per100 holds ONE serving and their single serving weighs a nominal 100 g.
  */
 import { uid, state } from './store.js';
 import { config } from './config.js';
@@ -424,8 +425,8 @@ function foodTokens(food) {
  * - Position: +2 when the first name token starts with the first query token.
  * - Completeness: −3 when per100 cal, p, c and f are all 0; −1 when cal is 0 (an all-zero food gets both).
  * - Length: −0.05 per name token beyond 6, so long USDA descriptions rank below short names at equal match.
- * - Popularity: +0.8 × log10(1 + food.pop) (Open Food Facts scan count); +1.5 for built-in foods
- *   (curated); +3 for library foods (id in localIds), +2 more for favorites, +1 more for recents.
+ * - Popularity: +0.8 × log10(1 + food.pop) (Open Food Facts scan count); +1.5 for built-in and
+ *   food-pack foods (curated); +3 for library foods (id in localIds), +2 more for favorites, +1 more for recents.
  * - Partial match (some query tokens missed): the total is multiplied by 0.25, so a typo in one word
  *   still surfaces the food, well below full matches.
  * A matched food whose penalties take the total to ≤ 0 scores 0.01, so 0 always means "no match".
@@ -472,8 +473,8 @@ export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new
   if (name.length > q.length) score -= 0.15 * (name.length - q.length);
   // Live results: each name word the query did not touch costs a little ("chicken breast sandwich"
   // ranks under "chicken breast"). Built-in USDA names carry structured descriptors, so they are exempt
-  // and get a flat curated bonus instead.
-  if (food.source === 'builtin') {
+  // and get a flat curated bonus instead (restaurant pack menus too).
+  if (food.source === 'builtin' || food.source === 'pack') {
     score += 2;
   } else {
     const unmatched = name.filter((w) => !q.some((t) => w.startsWith(t) || w.includes(t))).length;
@@ -568,16 +569,19 @@ export function nutrientsFor(food, grams) {
 }
 
 /**
- * All unit options for a food: its servings, then g and oz.
+ * All unit options for a food: its servings, then g and oz. A servingOnly food offers only its servings.
  * @param {object} food
  * @returns {{label:string, grams:number}[]}
  */
 export function unitOptions(food) {
-  return [...(food?.servings || []).map((s) => ({ label: s.label, grams: s.grams })), { ...UNIT_G }, { ...UNIT_OZ }];
+  const servings = (food?.servings || []).map((s) => ({ label: s.label, grams: s.grams }));
+  if (food?.servingOnly) return servings;
+  return [...servings, { ...UNIT_G }, { ...UNIT_OZ }];
 }
 
 /**
  * Build an Entry (without id/meal) from a food, quantity and unit. Nutrient snapshot rounded to 2 decimals.
+ * Carries `servingOnly: true` when the food has it (so the diary never shows its nominal grams).
  * @param {object} food
  * @param {number} qty
  * @param {{label:string, grams:number}} unit
@@ -587,7 +591,7 @@ export function buildEntry(food, qty, unit) {
   const q = Number(qty) || 0;
   const grams = q * (Number(unit?.grams) || 0);
   const n = nutrientsFor(food, grams);
-  return {
+  const entry = {
     foodId: food.id,
     name: food.name,
     brand: food.brand || '',
@@ -600,27 +604,32 @@ export function buildEntry(food, qty, unit) {
     f: r2(n.f),
     fiber: r2(n.fiber)
   };
+  if (food.servingOnly) entry.servingOnly = true;
+  return entry;
 }
 
 /**
  * Make a custom Food. per === 'serving' means the numbers are for `servingGrams` grams;
  * per === '100g' means they are per 100 g. Pass an existing id to keep it when editing.
+ * per === 'serving' with no serving grams (null / undefined / blank) makes a `servingOnly` food: the
+ * numbers are for one serving of unknown weight (label from servingLabel, else "1 serving").
  * @param {object} o
  * @returns {object} Food
- * @throws {Error} when per === 'serving' and servingGrams is not a positive number
+ * @throws {Error} when per === 'serving' and servingGrams is given but not a positive number
  */
 export function makeCustomFood({ id = null, name, brand = '', barcode = null, per, servingGrams, servingLabel: sLabel = '1 serving', cal, p, c, f, fiber = 0 }) {
-  const sg = num(servingGrams);
-  if (per === 'serving' && !(sg > 0)) throw new Error('Enter the serving size in grams.');
-  const k = per === 'serving' ? 100 / sg : 1;
+  const blank = servingGrams === null || servingGrams === undefined || String(servingGrams).trim() === '';
+  const servingOnly = per === 'serving' && blank;
+  const sg = blank ? null : num(servingGrams);
+  if (per === 'serving' && !servingOnly && !(sg > 0)) throw new Error('Enter the serving size in grams.');
+  const k = per === 'serving' && !servingOnly ? 100 / sg : 1;
   const v = (x) => r2((num(x) ?? 0) * k);
+  const base = String(sLabel || '1 serving').replace(/\s*\(\s*[\d.,]+\s*g\s*\)\s*$/i, '').trim() || '1 serving';
   const servings = [];
-  if (sg > 0) {
-    const base = String(sLabel || '1 serving').replace(/\s*\(\s*[\d.,]+\s*g\s*\)\s*$/i, '').trim() || '1 serving';
-    servings.push({ label: `${base} (${fmtG(sg)} g)`, grams: sg });
-  }
+  if (servingOnly) servings.push({ label: base, grams: 100 });
+  else if (sg > 0) servings.push({ label: `${base} (${fmtG(sg)} g)`, grams: sg });
   const bc = barcode === null || barcode === undefined ? '' : String(barcode).trim();
-  return {
+  const food = {
     id: id || `custom:${uid()}`,
     source: 'custom',
     barcode: bc || null,
@@ -628,6 +637,8 @@ export function makeCustomFood({ id = null, name, brand = '', barcode = null, pe
     brand: String(brand || '').trim(),
     per100: { cal: v(cal), p: v(p), c: v(c), f: v(f), fiber: v(fiber) },
     servings,
-    defaultGrams: sg > 0 ? sg : 100
+    defaultGrams: !servingOnly && sg > 0 ? sg : 100
   };
+  if (servingOnly) food.servingOnly = true;
+  return food;
 }

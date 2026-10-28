@@ -4,7 +4,7 @@
 import { toast, requestRender } from './ui.js';
 
 /** Bump together with VERSION in sw.js when deploying. Shown in Settings. */
-export const APP_VERSION = '1.1.2';
+export const APP_VERSION = '1.2.0';
 
 let registration = null;
 let updateReady = false;

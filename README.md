@@ -78,6 +78,49 @@ USDA_API_KEY=... node tools/build_foods.mjs
 
 PowerShell: `$env:USDA_API_KEY='...'; node tools/build_foods.mjs`. Add `--dry` to see the filtered counts without writing anything. A full build makes about 200 API requests (well under the key's 1,000 per hour) and takes about 15 minutes. The output is kept under 400 KB by dropping the most specific SR Legacy variants first.
 
+## Restaurant food packs
+
+A food pack is a restaurant menu as a JSON file. Its items are searched instantly alongside the built-in list, work offline and are logged per serving ("1 burrito"), since chains publish nutrition per item rather than per 100 g. Searching for the chain name finds them too, for example "taco bell burrito". The app ships with a Taco Bell pack (`data/packs/taco-bell.json`); the packs listed in `data/packs/index.json` are the built-in ones.
+
+### Building a pack
+
+Pack files are generated from the free public menu tables on [Nutritionix](https://www.nutritionix.com/), which many chains use for their own nutrition pages. To find a chain's slug, search for the chain on nutritionix.com and open its menu; the slug is the part of the address after the domain, e.g. `taco-bell` in `https://www.nutritionix.com/taco-bell/menu/premium`. Then run from the project root (no npm needed, Node 18+):
+
+```sh
+node tools/build_pack.mjs --nutritionix taco-bell --name "Taco Bell" --skip "Cantina Beer, Wine and Spirits"
+```
+
+(That is how the bundled Taco Bell pack is built: the 200 beers and wines of the Cantina locations would otherwise crowd the search results.)
+
+This writes `data/packs/<slug>.json`. Options: `--brand "..."` (defaults to the name; it is shown on every item and is searchable), `--out <file>` to write somewhere else, `--skip "Section A,Section B"` to leave whole menu sections out (exact section names as shown on the page, any letter case, separated by commas; a name that itself contains commas can be written as is, and the skipped names are recorded in the pack as `skipped`), `--dry` to print the item counts per menu section and the first 10 items without writing anything, and `--from <file.html>` to parse a copy of the menu page saved from your browser instead of downloading it (useful if the site refuses the request). Each item gets a serving label guessed from its name and section ("1 taco", "1 order", "1 drink (20 oz)", otherwise "1 serving").
+
+To ship a new pack with the app, add its file name to `data/packs/index.json` and to the `SHELL` list in `sw.js`, then bump `VERSION`.
+
+### Importing a personal pack
+
+You do not have to host a pack to use it: in **Settings → Food packs**, tap **Import food pack** and pick the JSON file. Imported packs are stored on that phone only and are included in backups. Importing a pack with the same `id` again replaces it (and overrides a built-in pack with that `id`); **Remove** deletes it.
+
+### Pack format
+
+```json
+{
+  "format": "macrotally-pack/1",
+  "id": "taco-bell",
+  "name": "Taco Bell",
+  "brand": "Taco Bell",
+  "source": "https://www.nutritionix.com/taco-bell/menu/premium",
+  "generated": "2026-10-28",
+  "foods": [
+    { "id": "166727", "n": "Burrito Supreme - Beef", "cat": "Burritos", "s": ["1 burrito", null], "v": [390, 16, 52, 14, 8] }
+  ]
+}
+```
+
+- `format` must be exactly `macrotally-pack/1`. `id` is a short lowercase name (`a-z`, `0-9`, `-`), `name` is shown in Settings and `brand` is attached to every item. `source`, `generated` and the optional `skipped` (menu sections left out by `--skip`) are for information only.
+- Each food has an `id` that is unique within the pack, a name `n`, an optional menu section `cat`, a serving `s` = `[label, grams]` and the nutrients `v` = `[kcal, protein g, carbs g, fat g, fiber g]` for one serving.
+- Use `null` for the grams when the serving weight is unknown (the usual case for restaurants); the item is then logged by the serving only. With a weight, the item can also be logged in grams or ounces.
+- Items with a missing `id` or name, or without at least four non-negative numbers in `v`, are skipped. A file with no valid items is rejected.
+
 ## Google Drive backup (optional, for the app owner)
 
 Each person who uses your link can connect their own Google account, and MacroTally will keep a copy of their data in a hidden, app-only folder of *their* Google Drive. It refreshes the copy about once a day when they open the app, and Settings has **Back up now** and **Restore from Drive** buttons. There is still no server: the phone talks to Google directly.

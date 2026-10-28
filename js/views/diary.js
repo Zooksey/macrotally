@@ -86,6 +86,8 @@ function unitText(e) {
   // "1 serving (30 g)" → "1 serving"; grams are shown separately.
   const label = raw.replace(/\s*\([\d.,]+\s*g\)\s*$/i, '') || raw;
   const sep = /^\d/.test(label) ? ' × ' : ' ';
+  // Serving-only foods (restaurant items) have a nominal 100 g per serving: never show grams.
+  if (e.servingOnly) return Number(e.qty) === 1 && /^\d/.test(label) ? esc(label) : `${fmtQty(e.qty)}${sep}${esc(label)}`;
   return `${fmtQty(e.qty)}${sep}${esc(label)} · ${fmt(e.grams)} g`;
 }
 
@@ -178,6 +180,8 @@ on('edit-entry', (el) => {
     const g = entry.grams > 0 ? entry.grams : 100;
     const k = 100 / g;
     const isServing = entry.unit && entry.unit.label !== 'g' && entry.unit.label !== 'oz';
+    // servingOnly: grams = qty × 100, so the same scaling yields per100 = one serving.
+    const servingOnly = !!entry.servingOnly;
     food = {
       id: entry.foodId,
       source: String(entry.foodId || '').split(':')[0] || 'custom',
@@ -191,10 +195,13 @@ on('edit-entry', (el) => {
         f: (entry.f || 0) * k,
         fiber: (entry.fiber || 0) * k
       },
-      servings: isServing ? [{ label: entry.unit.label, grams: entry.unit.grams }] : [],
-      defaultGrams: g,
+      servings: servingOnly
+        ? [{ label: (entry.unit && entry.unit.label) || '1 serving', grams: 100 }]
+        : isServing ? [{ label: entry.unit.label, grams: entry.unit.grams }] : [],
+      defaultGrams: servingOnly ? 100 : g,
       _snapshot: true
     };
+    if (servingOnly) food.servingOnly = true;
   }
   openFoodDetail(food, { meal: entry.meal, date, entry });
 });
