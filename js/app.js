@@ -8,6 +8,8 @@ import { planView } from './views/plan.js';
 import { settingsView } from './views/settings.js';
 import { openSetup } from './modals/setup.js';
 import { autoBackupIfDue } from './drive.js';
+import { preloadBuiltinFoods } from './builtin.js';
+import { registerAppUpdates, applyUpdate } from './update.js';
 import './modals/food.js';
 
 /**
@@ -90,19 +92,15 @@ function onVisible() {
 }
 
 function registerServiceWorker() {
-  if (!('serviceWorker' in navigator)) return;
-  const reg = () => {
-    try {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
-    } catch (err) {
-      // Ignore (e.g. insecure context or file://).
-    }
-  };
+  const reg = () => registerAppUpdates().catch(() => {});
   if (document.readyState === 'complete') reg();
   else window.addEventListener('load', reg);
 }
 
+on('app-update', () => applyUpdate());
+
 function start() {
+  preloadBuiltinFoods(); // fire-and-forget; never throws
   try {
     refreshExpenditure(state);
     save();

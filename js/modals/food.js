@@ -1,6 +1,10 @@
 // MacroTally — food modals: add-food search, food detail/amount, custom food editor, barcode scanner.
 import { state, uid, saveFood, deleteFood, addEntry, updateEntry, removeEntry, toggleFavorite } from '../store.js';
-import { searchFoods, lookupBarcode, nutrientsFor, unitOptions, buildEntry, makeCustomFood } from '../foods.js';
+import {
+  searchFoods, lookupBarcode, effectiveUsdaKey, searchLocal, rankFoods,
+  nutrientsFor, unitOptions, buildEntry, makeCustomFood
+} from '../foods.js';
+import { builtinFoods, loadBuiltinFoods } from '../builtin.js';
 import { startScanner, scannerSupported } from '../scanner.js';
 import {
   esc, fmt, fmtQty, parseNum, icon, on, openModal, closeModal, closeAllModals,
@@ -43,16 +47,28 @@ function servingHint(food) {
   return s ? ` · ${esc(s.label)}` : '';
 }
 
-function foodRow(food) {
+/**
+ * A tappable food row. Without `tag` (library tabs) it shows the Custom/USDA badge and a favorite star;
+ * with a tag string (search results) it shows just that small tag ('' → none).
+ */
+function foodRow(food, tag) {
   foodCache.set(food.id, food);
-  const badge = food.source === 'custom'
-    ? '<span class="badge">Custom</span>'
-    : food.source === 'usda' ? '<span class="badge">USDA</span>' : '';
+  let marks;
+  if (tag === undefined) {
+    const badge = food.source === 'custom'
+      ? '<span class="badge">Custom</span>'
+      : food.source === 'usda' || food.source === 'builtin' ? '<span class="badge">USDA</span>' : '';
+    marks = `${badge}${isFavorite(food.id) ? `<span class="fav-mark" aria-label="Favorite">${icon('star', 'icon-sm')}</span>` : ''}`;
+  } else if (tag === '★') {
+    marks = `<span class="tag tag-fav" aria-label="Favorite" title="Favorite">${esc(tag)}</span>`;
+  } else {
+    marks = tag ? `<span class="tag">${esc(tag)}</span>` : '';
+  }
   const per = food.per100 || {};
   return `
     <button type="button" class="row" data-action="pick-food" data-id="${esc(food.id)}">
       <div class="row-main">
-        <div class="row-title">${esc(food.name || 'Unnamed food')} ${badge}${isFavorite(food.id) ? `<span class="fav-mark" aria-label="Favorite">${icon('star', 'icon-sm')}</span>` : ''}</div>
+        <div class="row-title">${esc(food.name || 'Unnamed food')} ${marks}</div>
         <div class="row-sub">${food.brand ? `${esc(food.brand)} · ` : ''}${fmt(per.cal)} kcal / 100 g${servingHint(food)}</div>
       </div>
       <span class="chev">${icon('right')}</span>
@@ -61,7 +77,7 @@ function foodRow(food) {
 
 function listOrEmpty(foods, emptyText) {
   if (!foods.length) return `<p class="empty muted small">${esc(emptyText)}</p>`;
-  return `<div class="list">${foods.map(foodRow).join('')}</div>`;
+  return `<div class="list">${foods.map((f) => foodRow(f)).join('')}</div>`;
 }
 
 function normBarcode(code) {
@@ -74,15 +90,36 @@ function localByBarcode(code) {
   return Object.values(state.foods || {}).find((f) => f && f.barcode && normBarcode(f.barcode) === n) || null;
 }
 
-function localSearch(q) {
-  const tokens = q.toLowerCase().split(/\s+/).filter(Boolean);
-  if (!tokens.length) return [];
-  const hits = Object.values(state.foods || {}).filter((f) => {
-    const hay = `${f.name || ''} ${f.brand || ''}`.toLowerCase();
-    return tokens.every((t) => hay.includes(t));
+const isBarcodeQuery = (q) => /^\d{8,14}$/.test(q);
+
+/** Ranking boosts from the user's library, favorites and recents. */
+function rankOpts() {
+  return {
+    localIds: new Set(Object.keys(state.foods || {})),
+    favoriteIds: new Set(state.favorites || []),
+    recentIds: new Set(state.recents || [])
+  };
+}
+
+/** Instant, offline results: library + built-in list (or a library barcode match for a typed barcode). */
+function localResults(q) {
+  if (isBarcodeQuery(q)) {
+    const f = localByBarcode(q);
+    return f ? [f] : [];
+  }
+  return searchLocal(q, {
+    library: state.foods,
+    builtin: builtinFoods(),
+    recents: state.recents,
+    favorites: state.favorites,
+    limit: 25
   });
-  const rank = (f) => (isFavorite(f.id) ? 0 : 1) + (state.recents.includes(f.id) ? 0 : 1);
-  return hits.sort((a, b) => rank(a) - rank(b) || String(a.name).localeCompare(String(b.name))).slice(0, 10);
+}
+
+/** Search result tag: ★ (favorite) or "library" for library foods, "USDA" for built-in and live USDA, none for Open Food Facts. */
+function resultTag(food) {
+  if (state.foods && state.foods[food.id]) return isFavorite(food.id) ? '★' : 'library';
+  return food.source === 'builtin' || food.source === 'usda' ? 'USDA' : '';
 }
 
 /* ------------------------------------------------------------------ */
@@ -145,22 +182,31 @@ export function openAddFood(meal, date) {
   return bd;
 }
 
-function showResults(sheet, q, apiFoods, { loading = false, error = '' } = {}) {
+/**
+ * Render the combined result list for the sheet's current search state (`sheet._search`):
+ * local results (recomputed, so they are instant and include the built-in list once loaded),
+ * merged and re-ranked with network results when those have arrived, plus a status line
+ * ("Searching…" or the error) under the list rather than in place of it.
+ */
+function renderSearch(sheet) {
   const box = sheet.querySelector('.search-results');
   const lib = sheet.querySelector('.library');
-  if (!box) return;
-  const local = localSearch(q);
-  const localIds = new Set(local.map((f) => f.id));
-  const api = (apiFoods || []).filter((f) => f && !localIds.has(f.id));
+  const st = sheet._search;
+  if (!box || !st) return;
+  const local = localResults(st.q);
+  const foods = st.api ? rankFoods(st.q, [...local, ...st.api], { ...rankOpts(), limit: 40 }) : local;
   let html = '';
-  if (local.length) html += `<h3 class="list-head">In your library</h3><div class="list">${local.map(foodRow).join('')}</div>`;
-  if (loading) {
-    html += '<div class="searching"><span class="spinner" aria-hidden="true"></span> Searching Open Food Facts…</div>';
-  } else if (error) {
-    html += `<p class="inline-error">${esc(error)}</p>`;
-  } else if (apiFoods) {
-    if (api.length) html += `<h3 class="list-head">Results</h3><div class="list">${api.map(foodRow).join('')}</div>`;
-    else if (!local.length) html += '<p class="empty muted small">No matches. Try fewer words, or create a custom food.</p>';
+  if (foods.length) {
+    html += `<h3 class="list-head">Results</h3><div class="list">${foods.map((f) => foodRow(f, resultTag(f))).join('')}</div>`;
+  }
+  if (st.loading) {
+    html += '<div class="searching"><span class="spinner" aria-hidden="true"></span> Searching…</div>';
+  } else if (st.error) {
+    html += foods.length
+      ? `<p class="search-note muted small">${esc(st.error)}</p>`
+      : `<p class="inline-error">${esc(st.error)}</p>`;
+  } else if (st.api && !foods.length) {
+    html += '<p class="empty muted small">No matches. Try fewer words, or create a custom food.</p>';
   }
   box.innerHTML = html;
   box.hidden = false;
@@ -170,6 +216,7 @@ function showResults(sheet, q, apiFoods, { loading = false, error = '' } = {}) {
 function hideResults(sheet) {
   const box = sheet.querySelector('.search-results');
   const lib = sheet.querySelector('.library');
+  sheet._search = null;
   if (box) {
     box.hidden = true;
     box.innerHTML = '';
@@ -178,22 +225,23 @@ function hideResults(sheet) {
 }
 
 async function runSearch(sheet, q, seq) {
+  const usdaKey = effectiveUsdaKey(state.profile);
+  let api = null;
+  let error = '';
   try {
-    let foods;
-    if (/^\d{8,14}$/.test(q)) {
-      // A typed barcode: the product endpoint is far more reliable than text search.
-      const local = Object.values(state.foods).find((f) => f.barcode === q);
-      const found = local || await lookupBarcode(q);
-      foods = found ? [found] : [];
+    if (isBarcodeQuery(q)) {
+      // A typed barcode: the product endpoint (with the USDA Branded fallback) beats text search.
+      const found = localByBarcode(q) || await lookupBarcode(q, { usdaKey });
+      api = found ? [found] : [];
     } else {
-      foods = await searchFoods(q, { usdaKey: state.profile.usdaKey || '', region: state.profile.region || 'world' });
+      api = await searchFoods(q, { usdaKey, region: state.profile.region || 'world' });
     }
-    if (seq !== searchSeq || !sheet.isConnected) return;
-    showResults(sheet, q, foods || []);
   } catch (err) {
-    if (seq !== searchSeq || !sheet.isConnected) return;
-    showResults(sheet, q, null, { error: (err && err.message) || 'Search failed. Try again.' });
+    error = (err && err.message) || 'Search failed. Try again.';
   }
+  if (seq !== searchSeq || !sheet.isConnected || !sheet._search) return;
+  sheet._search = { q, seq, api: api || [], loading: false, error };
+  renderSearch(sheet);
 }
 
 function queueSearch(el, immediate) {
@@ -207,7 +255,14 @@ function queueSearch(el, immediate) {
     hideResults(sheet);
     return;
   }
-  showResults(sheet, q, null, { loading: true });
+  // Local results render on every keystroke; the network search waits for the debounce.
+  sheet._search = { q, seq, api: null, loading: true, error: '' };
+  renderSearch(sheet);
+  if (!builtinFoods().length) {
+    loadBuiltinFoods().then((list) => {
+      if (list.length && seq === searchSeq && sheet.isConnected && sheet._search) renderSearch(sheet);
+    });
+  }
   const go = () => runSearch(sheet, q, seq);
   if (immediate) go();
   else searchTimer = setTimeout(go, 650); // Open Food Facts allows ~10 searches/min, so wait for typing to settle
@@ -681,9 +736,10 @@ async function handleCode(bd, rawCode) {
     return;
   }
 
+  const usdaKey = effectiveUsdaKey(state.profile);
   let food = null;
   try {
-    food = await lookupBarcode(code);
+    food = await lookupBarcode(code, { usdaKey });
   } catch (err) {
     if (ctx.closed) return;
     ctx.busy = false;
@@ -697,7 +753,7 @@ async function handleCode(bd, rawCode) {
     openFoodDetail(food, { meal, date });
     return;
   }
-  const ok = await confirmDialog(`Not in Open Food Facts (${code}). Create it?`, { okLabel: 'Create food' });
+  const ok = await confirmDialog(`Not in Open Food Facts${usdaKey ? ' or USDA' : ''} (${code}). Create it?`, { okLabel: 'Create food' });
   if (ctx.closed) return;
   if (ok) {
     closeModal(bd);

@@ -68,6 +68,16 @@ Then open `http://localhost:8080/`. `localhost` counts as secure, so the camera 
 - [Open Food Facts](https://world.openfoodfacts.org) is always on and needs no key. Coverage of packaged foods is good but not perfect, and some entries have incomplete nutrition. If a scan is not found you can create the food once and it is remembered by barcode. Text search is limited by Open Food Facts to roughly 10 searches a minute per phone, so the app waits for you to stop typing before searching and remembers results you already fetched. Set your **Search region** in Settings so results are ranked by what is popular in your country.
 - [USDA FoodData Central](https://fdc.nal.usda.gov/) adds whole foods and US branded items. Get a free API key at https://fdc.nal.usda.gov/api-key-signup and paste it into Settings.
 
+## Built-in food list
+
+`data/foods.json` is a list of about 2,600 generic foods (USDA FoodData Central Foundation and SR Legacy, public domain) that ships with the app and is searched instantly, even offline. It is generated and committed; you only need to rebuild it to refresh the data. With a free USDA API key, run from the project root (no npm needed, Node 18+):
+
+```sh
+USDA_API_KEY=... node tools/build_foods.mjs
+```
+
+PowerShell: `$env:USDA_API_KEY='...'; node tools/build_foods.mjs`. Add `--dry` to see the filtered counts without writing anything. A full build makes about 200 API requests (well under the key's 1,000 per hour) and takes about 15 minutes. The output is kept under 400 KB by dropping the most specific SR Legacy variants first.
+
 ## Google Drive backup (optional, for the app owner)
 
 Each person who uses your link can connect their own Google account, and MacroTally will keep a copy of their data in a hidden, app-only folder of *their* Google Drive. It refreshes the copy about once a day when they open the app, and Settings has **Back up now** and **Restore from Drive** buttons. There is still no server: the phone talks to Google directly.
