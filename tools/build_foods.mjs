@@ -198,7 +198,10 @@ const PARTIAL = {
     !/crumbs|stuffing|dry mix|croutons/.test(d),
   'Sweets': (d) => /^(sugars?|honey|syrups?|jams|jellies|preserves|marmalade|baking chocolate|cocoa|chocolate)\b/.test(d) ||
     /^candies, (milk|semisweet|sweet|dark|white) chocolate/.test(d),
-  'Snacks': (d) => /^snacks, (popcorn|pretzels|potato chips|tortilla chips|corn-based, extruded, chips|pita chips)/.test(d)
+  'Snacks': (d) => /^snacks, (popcorn|pretzels|potato chips|tortilla chips|corn-based, extruded, chips|pita chips)/.test(d),
+  // Hot cereals only (oatmeal, grits); cold branded cereals come from live sources.
+  'Breakfast Cereals': (d) => /^cereals, (oats|corn grits|whole wheat hot natural cereal)\b/.test(d) &&
+    !/flavored|maple|apple|cinnamon|raisin|fruit|bran, |with added/.test(d)
 };
 
 /**
