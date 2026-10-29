@@ -1,6 +1,6 @@
 // MacroTally — first-run setup wizard (single form).
 import { state, save, todayStr, addWeight, toKg, fromKg, weightUnit } from '../store.js';
-import { refreshExpenditure, latestTrend } from '../calc.js';
+import { refreshExpenditure, latestTrend, snapshotTarget } from '../calc.js';
 import { esc, fmt, parseNum, on, openModal, closeModal, toast, requestRender, icon } from '../ui.js';
 import { heightFields, readHeightCm, activityOptions } from '../views/settings.js';
 
@@ -230,6 +230,7 @@ on('setup-save', (form) => {
   // Re-initialize the formula estimate from the new profile unless it has already gone adaptive.
   if (state.expenditure && state.expenditure.method !== 'adaptive') state.expenditure.kcal = null;
   refreshExpenditure(state, { force: true });
+  snapshotTarget(state);
   state.onboarded = true;
   save();
   closeModal(form.closest('.modal-backdrop'));

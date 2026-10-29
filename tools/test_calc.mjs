@@ -239,6 +239,134 @@ test('intakeSeries', () => {
   assert.deepEqual(calc.dayTotals(undefined), { cal: 0, p: 0, c: 0, f: 0, fiber: 0 });
 });
 
+// ---------- calc: calorie bank ----------
+// Manual base target 2000 kcal; diary days as { date: kcal } (null = a day with an empty entries list).
+function bankState(days = {}, bank = {}) {
+  const st = store.defaults();
+  st.goal.macroMode = 'manual';
+  st.goal.manual = { cal: 2000, p: 150, c: 200, f: 65 };
+  st.bank = { on: true, since: '2026-03-02', targets: {}, ...bank };
+  for (const [date, cal] of Object.entries(days)) {
+    st.diary[date] = { entries: cal === null ? [] : [{ cal: cal / 2 }, { cal: cal / 2 }] };
+  }
+  return st;
+}
+test('store: bank default + merge; backups carry it', () => {
+  assert.deepEqual(store.defaults().bank, { on: false, since: null, targets: {} });
+  store.replaceState({ goal: { mode: 'lose' } });
+  assert.deepEqual(store.state.bank, { on: false, since: null, targets: {} });
+  store.replaceState({ bank: { on: true } });
+  assert.deepEqual(store.state.bank, { on: true, since: null, targets: {} });
+  store.replaceState({ bank: { on: true, since: '2026-03-02', targets: 'junk' } });
+  assert.deepEqual(store.state.bank.targets, {});
+  store.state.bank = { on: true, since: '2026-03-02', targets: { '2026-03-02': 1900 } };
+  const json = store.exportJSON();
+  store.resetAll();
+  store.importJSON(json);
+  assert.deepEqual(store.state.bank, { on: true, since: '2026-03-02', targets: { '2026-03-02': 1900 } });
+  store.resetAll();
+});
+test('bankStreakStart: first day of the logged run ending yesterday, else the date itself', () => {
+  // 03-02..03-04 logged, 03-01 unlogged, 02-28 logged: the streak seen from 03-05 starts 03-02.
+  const st = bankState({ '2026-02-28': 1800, '2026-03-02': 1800, '2026-03-03': 1700, '2026-03-04': 2100 }, {});
+  assert.equal(calc.bankStreakStart(st, '2026-03-05'), '2026-03-02');
+  assert.equal(calc.bankStreakStart(st, '2026-03-06'), '2026-03-06', 'yesterday unlogged → today');
+  assert.equal(calc.bankStreakStart(st, '2026-03-05', 2), '2026-03-03', 'maxDays limits the look-back');
+  assert.equal(calc.bankStreakStart({ diary: {} }, '2026-03-05'), '2026-03-05');
+});
+
+test('bankStatus: off or since null → null', () => {
+  assert.equal(calc.bankStatus(bankState({ '2026-03-02': 1800 }, { on: false }), '2026-03-05'), null);
+  assert.equal(calc.bankStatus(bankState({ '2026-03-02': 1800 }, { since: null }), '2026-03-05'), null);
+  assert.equal(calc.bankStatus(store.defaults(), '2026-03-05'), null);
+});
+test('bankStatus: three logged days with the running balance', () => {
+  const st = bankState({ '2026-03-02': 1800, '2026-03-03': 2100, '2026-03-04': 1900.4, '2026-03-05': 500 });
+  const b = calc.bankStatus(st, '2026-03-05');
+  assert.equal(b.balance, 200);
+  assert.equal(b.since, '2026-03-02');
+  assert.equal(b.from, '2026-03-02');
+  assert.equal(b.resetDate, null);
+  assert.deepEqual(b.days, [
+    { date: '2026-03-02', target: 2000, eaten: 1800, diff: 200, balance: 200 },
+    { date: '2026-03-03', target: 2000, eaten: 2100, diff: -100, balance: 100 },
+    { date: '2026-03-04', target: 2000, eaten: 1900.4, diff: 100, balance: 200 }
+  ]);
+});
+test('bankStatus: an unlogged day in the middle resets', () => {
+  // 03-03 has no diary day at all; 03-05 has an empty entries list (also unlogged).
+  const st = bankState({ '2026-03-02': 1500, '2026-03-04': 1800, '2026-03-06': 2100 });
+  const b = calc.bankStatus(st, '2026-03-05');
+  assert.equal(b.balance, 200);
+  assert.equal(b.resetDate, '2026-03-03');
+  assert.equal(b.from, '2026-03-04');
+  assert.deepEqual(b.days.map((d) => d.date), ['2026-03-04'], 'days before the reset are not listed');
+  st.diary['2026-03-05'] = { entries: [] };
+  const c = calc.bankStatus(st, '2026-03-08');
+  assert.equal(c.resetDate, '2026-03-07');
+  assert.equal(c.from, '2026-03-08');
+  assert.deepEqual(c.days, []);
+  st.diary['2026-03-07'] = { entries: [{ cal: 2000 }] };
+  const d = calc.bankStatus(st, '2026-03-08');
+  assert.equal(d.resetDate, '2026-03-05');
+  assert.deepEqual(d.days.map((x) => x.diff), [-100, 0]);
+  assert.equal(d.balance, -100);
+});
+test('bankStatus: unlogged most recent finished day → balance 0, days empty', () => {
+  const st = bankState({ '2026-03-02': 1500, '2026-03-03': 1700 });
+  const b = calc.bankStatus(st, '2026-03-05');
+  assert.equal(b.balance, 0);
+  assert.deepEqual(b.days, []);
+  assert.equal(b.resetDate, '2026-03-04');
+  assert.equal(b.from, '2026-03-05');
+});
+test('bankStatus: date and today are excluded (a future date shows today\'s bank)', () => {
+  const today = store.todayStr();
+  const d = (n) => store.addDays(today, n);
+  const st = bankState({ [d(-3)]: 1900, [d(-2)]: 1800, [d(-1)]: 2300, [today]: 100, [d(1)]: 100 }, { since: d(-3) });
+  const y = calc.bankStatus(st, d(-1));
+  assert.deepEqual(y.days.map((x) => x.date), [d(-3), d(-2)]);
+  assert.equal(y.balance, 300);
+  const t = calc.bankStatus(st);
+  assert.deepEqual(t.days.map((x) => x.date), [d(-3), d(-2), d(-1)], 'today is not finished');
+  assert.equal(t.balance, 0);
+  assert.deepEqual(calc.bankStatus(st, d(1)), t);
+  assert.deepEqual(calc.bankStatus(st, d(5)), t);
+});
+test('bankStatus: a day\'s snapshot wins over the current target', () => {
+  const st = bankState({ '2026-03-02': 2000, '2026-03-03': 2000 });
+  st.goal.manual.cal = 2500;
+  assert.equal(calc.snapshotTarget(st, '2026-03-02'), 2500);
+  st.goal.manual.cal = 2200;
+  const b = calc.bankStatus(st, '2026-03-04');
+  assert.deepEqual(b.days.map((x) => x.target), [2500, 2200], 'no snapshot for 03-03 → current target');
+  assert.equal(b.balance, 700);
+});
+test('snapshotTarget writes today and prunes keys before since and older than 400 days', () => {
+  const today = store.todayStr();
+  const d = (n) => store.addDays(today, n);
+  const st = bankState({}, { since: d(-2), targets: { [d(-5)]: 1, [d(-2)]: 2, [d(-500)]: 3 } });
+  assert.equal(calc.snapshotTarget(st), 2000);
+  assert.deepEqual(st.bank.targets, { [d(-2)]: 2, [today]: 2000 });
+  st.bank.since = null;
+  st.bank.targets = { [d(-401)]: 1, [d(-399)]: 2 };
+  st.goal.manual.cal = 1900;
+  calc.snapshotTarget(st);
+  assert.deepEqual(st.bank.targets, { [d(-399)]: 2, [today]: 1900 });
+  const bare = store.defaults();
+  delete bare.bank;
+  calc.snapshotTarget(bare);
+  assert.equal(Object.keys(bare.bank.targets).length, 1, 'creates the bank object when missing');
+});
+test('bankStatus: days before since are ignored', () => {
+  const st = bankState({ '2026-03-01': 500, '2026-03-02': 1900, '2026-03-03': 1800 }, { since: '2026-03-02' });
+  const b = calc.bankStatus(st, '2026-03-04');
+  assert.deepEqual(b.days.map((x) => x.date), ['2026-03-02', '2026-03-03']);
+  assert.equal(b.balance, 300);
+  st.bank.since = '2026-03-03';
+  assert.equal(calc.bankStatus(st, '2026-03-04').balance, 200);
+});
+
 // ---------- foods ----------
 test('parseServingGrams', () => {
   assert.equal(foods.parseServingGrams('30 g', null), 30);

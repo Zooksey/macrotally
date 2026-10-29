@@ -236,3 +236,93 @@ export function intakeSeries(state, days = 14) {
   }
   return out;
 }
+
+// ---------- Calorie bank ----------
+
+/**
+ * Record the base calorie target for `date` (default today) in state.bank.targets, so later target
+ * changes do not rewrite past days. Drops snapshots older than bank.since or older than 400 days.
+ * Mutates state; caller saves.
+ * @param {object} state
+ * @param {string} [date=todayStr()]
+ * @returns {number} the recorded kcal
+ */
+export function snapshotTarget(state, date = todayStr()) {
+  if (!state.bank || typeof state.bank !== 'object') state.bank = { on: false, since: null, targets: {} };
+  const bank = state.bank;
+  if (!bank.targets || typeof bank.targets !== 'object' || Array.isArray(bank.targets)) bank.targets = {};
+  const cal = targets(state).cal;
+  bank.targets[date] = cal;
+  const oldest = addDays(date, -400);
+  for (const k of Object.keys(bank.targets)) {
+    if (k < oldest || (bank.since && k < bank.since)) delete bank.targets[k];
+  }
+  return cal;
+}
+
+/**
+ * The calorie bank as of `date`: the tally of finished days from bank.since up to but excluding
+ * min(date, today). null when bank.on is false or since is null. Days oldest first: a day with no entries
+ * resets the balance to 0 (resetDate = that day; the list restarts after it); a day with entries adds
+ * diff = round(target − eaten), target = bank.targets[day] ?? targets(state).cal.
+ * @param {object} state
+ * @param {string} [date=todayStr()]
+ * @returns {null|{balance:number, since:string, from:string, resetDate:string|null,
+ *   days:{date:string, target:number, eaten:number, diff:number, balance:number}[]}}
+ *   from: first counted day (the day after the last reset, or since); days: counted days oldest first
+ *   with the running balance.
+ */
+export function bankStatus(state, date = todayStr()) {
+  const bank = state?.bank;
+  if (!bank || !bank.on || !bank.since) return null;
+  const today = todayStr();
+  const end = date < today ? date : today;
+  const snaps = bank.targets && typeof bank.targets === 'object' ? bank.targets : {};
+  let current = null;
+  let balance = 0;
+  let from = bank.since;
+  let resetDate = null;
+  let days = [];
+  for (let d = bank.since; d < end; d = addDays(d, 1)) {
+    const day = state.diary?.[d];
+    if (!day?.entries?.length) {
+      balance = 0;
+      resetDate = d;
+      from = addDays(d, 1);
+      days = [];
+      continue;
+    }
+    const snap = Number(snaps[d]);
+    let target;
+    if (snaps[d] !== null && snaps[d] !== undefined && Number.isFinite(snap)) {
+      target = snap;
+    } else {
+      if (current === null) current = targets(state).cal;
+      target = current;
+    }
+    const eaten = dayTotals(day).cal;
+    const diff = Math.round(target - eaten);
+    balance += diff;
+    days.push({ date: d, target, eaten, diff, balance });
+  }
+  return { balance, since: bank.since, from, resetDate, days };
+}
+
+/**
+ * Where a newly switched-on bank should start counting: the first day of the run of logged days that ends
+ * yesterday (so the tally reflects the current streak at once), or `date` itself when yesterday has no
+ * entries. Looks back at most `maxDays` days.
+ * @param {object} state
+ * @param {string} [date=todayStr()]
+ * @param {number} [maxDays=60]
+ * @returns {string} YYYY-MM-DD
+ */
+export function bankStreakStart(state, date = todayStr(), maxDays = 60) {
+  let start = date;
+  for (let i = 1; i <= maxDays; i++) {
+    const d = addDays(date, -i);
+    if (!state.diary?.[d]?.entries?.length) break;
+    start = d;
+  }
+  return start;
+}

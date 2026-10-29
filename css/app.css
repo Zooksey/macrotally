@@ -470,6 +470,44 @@ svg {
   opacity: 0.55;
 }
 
+/* Calorie bank: positive balance (Diary summary line, Plan card). */
+.bank-pos {
+  color: var(--accent);
+}
+
+/* Plan → Calorie bank ledger (one row per counted day, like .pack-row). */
+.ledger {
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.ledger-row {
+  display: grid;
+  grid-template-columns: 3.6em 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger-day {
+  font-weight: 600;
+}
+
+.ledger-diff {
+  text-align: right;
+  font-weight: 600;
+}
+
+.ledger-sum {
+  margin: 4px 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- Forms ---------- */
 
 .field {

@@ -1,8 +1,8 @@
 // MacroTally — Plan view: expenditure, targets, goal settings, intake chart.
 import { state, save, todayStr, addDays, daysBetween, parseDate, toKg, fromKg, weightUnit, KG_PER_LB } from '../store.js';
-import { refreshExpenditure, estimateExpenditure, targets, projection, intakeSeries, latestTrend } from '../calc.js';
+import { refreshExpenditure, estimateExpenditure, targets, projection, intakeSeries, latestTrend, snapshotTarget, bankStatus, bankStreakStart } from '../calc.js';
 import { lineChart, barChart } from '../charts.js';
-import { esc, fmt, parseNum, dateLabel, shortDate, on, toast, requestRender } from '../ui.js';
+import { esc, fmt, parseNum, dateLabel, shortDate, on, toast, requestRender, confirmDialog } from '../ui.js';
 
 const RECALC_REASON = 'Needs ≥7 logged days and 2 weigh-ins ≥7 days apart in the last 3 weeks';
 const RATE_PRESETS = [0.25, 0.5, 0.75, 1];
@@ -159,6 +159,54 @@ function goalForm() {
     </form>`;
 }
 
+const BANK_HINT = 'Every finished day adds target minus eaten to the bank: under target saves calories, over '
+  + 'target takes them off. A day with nothing logged resets the bank. Your targets never change; spend or '
+  + 'make up the balance when you choose.';
+const BANK_ROWS = 60;
+
+/** Signed kcal with a real minus sign and its colour class: +180 (bank-pos) / −150 (over) / 0 (muted). */
+function signedKcal(n) {
+  const v = Math.round(Number(n) || 0);
+  if (v > 0) return `<span class="bank-pos">+${fmt(v)}</span>`;
+  if (v < 0) return `<span class="over">−${fmt(-v)}</span>`;
+  return '<span class="muted">0</span>';
+}
+
+/** 'Tue 28' for a ledger row. */
+function ledgerDay(date) {
+  const d = parseDate(date);
+  return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${d.getDate()}`;
+}
+
+/** 'Mon 27 Oct'. */
+function longDay(date) {
+  const d = parseDate(date);
+  return `${ledgerDay(date)} ${d.toLocaleDateString(undefined, { month: 'short' })}`;
+}
+
+function bankDetails() {
+  const st = bankStatus(state);
+  if (!st) return '';
+  const rows = st.days.slice(-BANK_ROWS).reverse().map((d) => `
+        <div class="ledger-row"><span class="ledger-day">${esc(ledgerDay(d.date))}</span><span class="ledger-eat">${fmt(d.eaten)} / ${fmt(d.target)}</span><span class="ledger-diff">${signedKcal(d.diff)}</span></div>`).join('');
+  return `
+      <p class="ledger-sum">Bank ${signedKcal(st.balance)} kcal · since ${esc(longDay(st.from))}</p>
+      ${st.resetDate ? `<p class="muted small">Reset on ${esc(longDay(st.resetDate))} (no food logged)</p>` : ''}
+      ${st.days.length ? `<div class="ledger">${rows}</div>` : '<p class="muted small">Nothing counted yet. Finished days are added the next day.</p>'}
+      ${st.days.length ? '<button type="button" class="btn btn-ghost btn-block" data-action="bank-reset">Reset bank</button>' : ''}`;
+}
+
+function bankCard() {
+  const on = !!(state.bank && state.bank.on);
+  return `
+    <section class="card bank-card">
+      <h2>Calorie bank</h2>
+      <label class="check-row"><input type="checkbox" data-change="bank-toggle"${on ? ' checked' : ''}><span>Keep a calorie bank</span></label>
+      ${on ? bankDetails() : ''}
+      <p class="hint">${esc(BANK_HINT)}</p>
+    </section>`;
+}
+
 function intakeCard() {
   const t = targets(state);
   const series = intakeSeries(state, 14);
@@ -179,7 +227,7 @@ function intakeCard() {
 }
 
 /**
- * Plan tab: expenditure estimate, current targets, goal form and intake chart.
+ * Plan tab: expenditure estimate, current targets, calorie bank, goal form and intake chart.
  * @returns {string} HTML
  */
 export function planView() {
@@ -187,6 +235,7 @@ export function planView() {
     <header class="topbar"><h1>Plan</h1></header>
     ${expenditureCard()}
     ${targetsCard()}
+    ${bankCard()}
     ${goalForm()}
     ${intakeCard()}`;
 }
@@ -194,6 +243,7 @@ export function planView() {
 on('recalc', () => {
   const before = state.expenditure.kcal;
   refreshExpenditure(state, { force: true });
+  snapshotTarget(state);
   save();
   const est = estimateExpenditure(state, addDays(todayStr(), -1));
   if (state.expenditure.method !== 'adaptive' || est == null) {
@@ -284,7 +334,30 @@ on('save-goal', (form) => {
   g.macroMode = macroMode;
   g.manual = manual;
   if (!g.startDate || modeChanged) g.startDate = todayStr();
+  snapshotTarget(state);
   save();
   toast('Goal saved');
+  requestRender();
+});
+
+on('bank-toggle', (el) => {
+  const bank = state.bank;
+  bank.on = !!el.checked;
+  if (bank.on) {
+    if (!bank.since) bank.since = bankStreakStart(state); // count the current logged streak from the start
+    snapshotTarget(state);
+  }
+  save();
+  toast(bank.on ? 'Calorie bank on' : 'Calorie bank off');
+  requestRender();
+});
+
+on('bank-reset', async () => {
+  const ok = await confirmDialog('Start the bank again from today?', { okLabel: 'Reset' });
+  if (!ok) return;
+  state.bank.since = todayStr();
+  snapshotTarget(state);
+  save();
+  toast('Bank reset');
   requestRender();
 });

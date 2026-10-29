@@ -79,6 +79,9 @@ export function defaults() {
       startDate: null
     },
     expenditure: { kcal: null, method: null, updatedAt: null, detail: null, history: [] },
+    // Calorie bank: running tally of (target − eaten) over finished days since `since` (see bankStatus in
+    // js/calc.js). targets = { 'YYYY-MM-DD': kcal } snapshots of the base calorie target per day.
+    bank: { on: false, since: null, targets: {} },
     weights: [],
     foods: {},
     diary: {},
@@ -103,14 +106,15 @@ export function defaults() {
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/drive objects are merged too. */
+/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/bank/drive objects are merged too. */
 function merge(obj) {
   const out = Object.assign(defaults(), isObj(obj) ? obj : {});
   const d = defaults();
-  for (const k of ['profile', 'goal', 'expenditure', 'drive']) {
+  for (const k of ['profile', 'goal', 'expenditure', 'bank', 'drive']) {
     out[k] = Object.assign({}, d[k], isObj(out[k]) ? out[k] : {});
   }
   out.goal.manual = Object.assign({}, d.goal.manual, isObj(out.goal.manual) ? out.goal.manual : {});
+  if (!isObj(out.bank.targets)) out.bank.targets = {};
   if (!Array.isArray(out.expenditure.history)) out.expenditure.history = [];
   if (!Array.isArray(out.weights)) out.weights = [];
   if (!Array.isArray(out.recents)) out.recents = [];

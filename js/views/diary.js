@@ -1,6 +1,6 @@
 // MacroTally — Diary view: daily totals vs targets, meals, quick weigh-in.
 import { state, todayStr, addDays, toKg, weightUnit, addWeight } from '../store.js';
-import { dayTotals, targets } from '../calc.js';
+import { dayTotals, targets, bankStatus } from '../calc.js';
 import { esc, fmt, fmtQty, parseNum, dateLabel, icon, on, toast, requestRender } from '../ui.js';
 import { nav } from '../app.js';
 import { openAddFood, openFoodDetail } from '../modals/food.js';
@@ -40,7 +40,17 @@ function macroBar(label, eaten, target, color) {
     </div>`;
 }
 
-function summaryCard(tot, t) {
+/** "Bank +340 kcal" / "Bank −200 kcal" / "Bank 0 kcal" under the target when the calorie bank is on. */
+function bankLine(date) {
+  if (!state.bank || !state.bank.on) return '';
+  const st = bankStatus(state, date);
+  const b = st ? Math.round(st.balance) : 0;
+  if (b > 0) return `<div class="small bank-pos">Bank +${fmt(b)} kcal</div>`;
+  if (b < 0) return `<div class="small over">Bank −${fmt(-b)} kcal</div>`;
+  return '<div class="muted small">Bank 0 kcal</div>';
+}
+
+function summaryCard(tot, t, date) {
   const remaining = Math.round(t.cal - tot.cal);
   const pct = t.cal > 0 ? Math.min(100, (tot.cal / t.cal) * 100) : 0;
   const remText = remaining >= 0
@@ -52,6 +62,7 @@ function summaryCard(tot, t) {
         <div>
           <div class="big-num">${fmt(tot.cal)}</div>
           <div class="muted small">of ${fmt(t.cal)} kcal</div>
+          ${bankLine(date)}
         </div>
         <div class="summary-rem">${remText}</div>
       </div>
@@ -117,7 +128,7 @@ function mealSection(meal, entries, canAdd) {
 }
 
 /**
- * Diary tab: date navigation, daily summary vs targets, quick weigh-in, and per-meal entries.
+ * Diary tab: date navigation, daily summary vs targets (plus the calorie bank line when on), quick weigh-in, and per-meal entries.
  * @returns {string} HTML
  */
 export function diaryView() {
@@ -148,7 +159,7 @@ export function diaryView() {
       <button type="button" class="icon-btn" data-action="diary-shift" data-days="1" aria-label="Next day">${icon('right')}</button>
     </header>
     ${updateBanner()}
-    ${summaryCard(tot, t)}
+    ${summaryCard(tot, t, date)}
     ${driveBanner()}
     ${weighInCard(date)}
     ${sections.join('')}

@@ -101,6 +101,10 @@ State shape:
     startDate: null|string
   },
   expenditure: { kcal:null|number, method:'formula'|'adaptive'|null, updatedAt:null|string, detail:null|object, history:[{date,kcal,method}] },
+  bank: { on:false, since:null|string, targets:{ [date]: kcal } },
+  // calorie bank (deep-merged like profile/goal; backups carry it): since = first day counted (set to today when
+  // switched on and by Reset); targets = per-day snapshots of the base calorie target (snapshotTarget), pruned
+  // before since and after 400 days; a past day without a snapshot uses today's base target
   weights: [ { date:'YYYY-MM-DD', kg:number } ],   // sorted asc, one per date
   foods: { [foodId]: Food },                        // local library: custom foods + any food that was ever logged/favorited (cached copies of API foods)
   diary: { [date]: { entries: Entry[] } },
@@ -185,6 +189,19 @@ export function projection(state)
 /** Weekly intake summary for charts: for the last `days` days ending today returns
  *  [{date, cal, logged:boolean}] */
 export function intakeSeries(state, days = 14)
+
+/** Record today's base calorie target: state.bank.targets[date] = targets(state).cal; drop keys older than
+ *  bank.since or older than 400 days. Returns the value. Caller saves. Called at app start (after
+ *  refreshExpenditure), after save-goal, after recalc, and when the bank is switched on or reset. */
+export function snapshotTarget(state, date = todayStr()): number
+
+/** Calorie bank as of `date`: tally of finished days from bank.since up to but excluding min(date, today).
+ *  null when bank.on is false or since is null. Days oldest first: a day with no entries resets (balance = 0,
+ *  resetDate = that day, the days list restarts after it); a day with entries adds
+ *  diff = round(target − eaten), target = bank.targets[day] ?? targets(state).cal.
+ *  returns { balance, since, from, resetDate, days:[{date, target, eaten, diff, balance}] }
+ *  from = first counted day (day after the last reset, or since); days = counted days oldest first */
+export function bankStatus(state, date = todayStr())
 ```
 
 ---
@@ -295,7 +312,7 @@ export function confirmDialog(message, { okLabel = 'OK', danger = false } = {}):
 
 **Diary** (`views/diary.js`, export `diaryView()`):
 - Top bar: ‹ / date label (+ "Today" link when not today) / ›.
-- Summary card: big calories eaten, "of N kcal", remaining (red "over" when negative), progress bar, three macro bars (Protein/Carbs/Fat) with `eaten / target g`. Fiber shown small below.
+- Summary card: big calories eaten, "of N kcal" (when the calorie bank is on, one line below from `bankStatus(state, date)`: "Bank +340 kcal" green / "Bank −200 kcal" red / "Bank 0 kcal" muted; targets unchanged), remaining (red "over" when negative), progress bar, three macro bars (Protein/Carbs/Fat) with `eaten / target g`. Fiber shown small below.
 - If no weigh-in today: small "Log today's weight" inline form (number input in user units + Save).
 - One section per meal: entry rows (name, brand small, "qty unit · g", cal, tiny p/c/f), tap row → food detail modal in edit mode; "+ Add food" button per meal → add-food modal.
 - Tiny footer note on first use: "Log everything you eat; unlogged days are ignored by the expenditure estimate, partial days drag it down."
@@ -309,6 +326,7 @@ export function confirmDialog(message, { okLabel = 'OK', danger = false } = {}):
 **Plan** (`views/plan.js`, export `planView()`):
 - Expenditure card: current kcal/day, method badge (Initial estimate / Adaptive), last updated, detail line ("Avg intake 2,140 · trend −0.9 lb over 14 d · 12 logged days"), "Recalculate now" button (calls refreshExpenditure force → toast result or reason it couldn't: "Needs ≥7 logged days and 2 weigh-ins ≥7 days apart in the last 3 weeks"). Small line chart of expenditure history if ≥2 points.
 - Targets card: calories, protein, carbs, fat (from `targets`), floored warning, projection ("≈ 14 weeks · Feb 3").
+- Calorie bank card (right after Targets): checkbox row "Keep a calorie bank" (data-change="bank-toggle"; on → since = today if null, snapshotTarget, toast "Calorie bank on"; off keeps since/targets, toast "Calorie bank off"). When on: "Bank +340 kcal · since Mon 27 Oct" (from `bankStatus(state)`), muted "Reset on Wed 29 Oct (no food logged)" when resetDate is set, ledger of counted days newest first (max 60): "Tue 28 · 1,820 / 2,000 · +180", or "Nothing counted yet. Finished days are added the next day."; "Reset bank" ghost button (data-action="bank-reset", hidden when nothing counted) → confirmDialog "Start the bank again from today?" → since = today, snapshot, toast "Bank reset". Hint explains the rules. Targets card and intake chart are unchanged.
 - Goal form (data-submit="save-goal"): mode select; target weight; rate per week (user units, magnitude) with hint of % of bodyweight/week and preset buttons 0.25% / 0.5% / 0.75% / 1% that fill the rate; protein (g per lb when imperial, g per kg when metric — convert on save); fat %; macro mode auto/manual; manual cal/p/c/f fields (shown when manual). Save → store, toast, rerender.
 - Intake bar chart: last 14 days (`intakeSeries`) with target line; unlogged days muted.
 

@@ -1,6 +1,6 @@
 // MacroTally — bootstrap, tab router, render loop.
 import { state, save, todayStr } from './store.js';
-import { refreshExpenditure } from './calc.js';
+import { refreshExpenditure, snapshotTarget } from './calc.js';
 import { bindGlobalEvents, on, requestRender, icon, esc } from './ui.js';
 import { diaryView } from './views/diary.js';
 import { weightView } from './views/weight.js';
@@ -83,7 +83,9 @@ function onVisible() {
     if (nav.date === lastToday) nav.date = today;
     lastToday = today;
     try {
-      if (refreshExpenditure(state)) save();
+      refreshExpenditure(state);
+      snapshotTarget(state);
+      save();
     } catch (err) {
       console.error(err);
     }
@@ -105,6 +107,7 @@ function start() {
   preloadPacks(); // fire-and-forget; never throws
   try {
     refreshExpenditure(state);
+    snapshotTarget(state);
     save();
   } catch (err) {
     console.error(err);
