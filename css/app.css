@@ -1458,6 +1458,14 @@ input[type="checkbox"] {
   flex: 1 1 130px;
 }
 
+.ai-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  flex: 1 1 100%;
+  padding: 10px 10px 2px 0;
+}
+
 .ai-thumb {
   position: relative;
   flex: none;

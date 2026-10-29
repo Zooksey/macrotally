@@ -11,3 +11,16 @@ Amount: set grams to what the user ate in grams when stated or derivable (e.g. "
 set servings (e.g. "two slices" means 2 with a per-slice serving). For a plate photo with no quantities,
 estimate portions and use confidence "estimate".
 Keep notes to one short sentence (what you assumed). Put the label or page you used in source.
+Be quick: at most two web searches and two page fetches in total, then answer with the best data you have.
+For a packaged product, try first a WebFetch of the Open Food Facts search API:
+https://search.openfoodfacts.org/search?q=<brand and product>&page_size=5&fields=product_name,brands,serving_size,nutriments
+(hits carry nutriments per 100 g: energy-kcal_100g, proteins_100g, carbohydrates_100g, fat_100g, fiber_100g;
+entries are user-contributed, so pick the hit whose brand and name match and whose numbers look like a real
+label, and report them per 100 g with confidence "web"). If WebSearch result snippets already show the label
+numbers, use them rather than fetching more pages. Next best: the manufacturer's site, FatSecret, Nutritionix,
+MyFoodData. Grocery retailer pages (Kroger, Walmart, Target, Instacart, Amazon and the like) are blocked and
+must not be fetched; if a fetch fails, do not retry it or try another retailer.
+Several photos show the same food (for example the front of the pack and its nutrition panel). When a photo
+shows a Nutrition Facts panel, read the numbers from it (confidence "label", source "nutrition panel in photo")
+and take the product name, brand and flavour from the other photos or the text; do not search the web when the
+panel is readable.

@@ -12,6 +12,8 @@ const ASK_TIMEOUT_MS = 95000;
 const HEALTH_TIMEOUT_MS = 15000;
 /** Longest description the helper accepts. */
 export const MAX_AI_TEXT = 2000;
+/** Most photos per ask (the helper's limit too). */
+export const MAX_AI_PHOTOS = 4;
 
 /**
  * true when the AI helper is set up (url and secret both non-empty).
@@ -112,7 +114,7 @@ export function aiErrorMessage(status, serverError = '') {
   if (status === 429) return 'The helper is busy, try again in a minute';
   if (status === 504) return 'The helper took too long';
   if (status === 502) return "Claude didn't return a food";
-  if (status === 413) return 'That photo is too large for the helper';
+  if (status === 413) return 'The photos are too large for the helper';
   if (status === 404) return 'No AI helper at that address (404)';
   if (status === 400) return serverError ? `The helper refused the request: ${serverError}` : 'The helper refused the request';
   return `The helper had a problem (HTTP ${status})`;
@@ -164,14 +166,21 @@ async function call(path, { method = 'GET', body, signal, timeoutMs }) {
 }
 
 /**
- * Ask the helper about a meal: POST /v1/food. Records state.ai.lastOk (and clears lastError) or lastError, and
- * saves. A caller abort rejects with an error whose `cancelled` is true (not recorded).
- * @param {{text?: string, image?: {base64: string, mime?: string}|null, signal?: AbortSignal}} o
+ * Ask the helper about a meal: POST /v1/food. Photos (downscaleImage results, at most MAX_AI_PHOTOS) are sent as
+ * `images: [{data, mime}]`, nothing when there are none; the older one-photo `image` argument is still sent as
+ * the `image` + `mime` shorthand. Records state.ai.lastOk (and clears lastError) or lastError, and saves. A
+ * caller abort rejects with an error whose `cancelled` is true (not recorded).
+ * @param {{text?: string, images?: {base64: string, mime?: string}[], image?: {base64: string, mime?: string}|null, signal?: AbortSignal}} o
  * @returns {Promise<{items: object[], model?: string, seconds?: number}>}
  */
-export async function askAi({ text = '', image = null, signal } = {}) {
+export async function askAi({ text = '', images = [], image = null, signal } = {}) {
   const body = { text: String(text || '') };
-  if (image && image.base64) {
+  const list = (Array.isArray(images) ? images : [])
+    .filter((im) => im && (im.base64 || im.data))
+    .slice(0, MAX_AI_PHOTOS)
+    .map((im) => ({ data: im.base64 || im.data, mime: im.mime || 'image/jpeg' }));
+  if (list.length) body.images = list;
+  else if (image && image.base64) {
     body.image = image.base64;
     body.mime = image.mime || 'image/jpeg';
   }

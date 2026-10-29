@@ -273,6 +273,19 @@ await testAsync('askAi posts with the secret, records lastOk / lastError', async
   assert.ok(store.state.ai.lastOk);
   assert.equal(store.state.ai.lastError, null);
 
+  // Several photos go as images: [{data, mime}]; none at all sends no image fields.
+  await ai.askAi({ text: '71g', images: [{ base64: 'AAAA', mime: 'image/jpeg' }, { base64: 'BBBB', mime: 'image/png' }] });
+  assert.deepEqual(JSON.parse(calls[1].opts.body), {
+    text: '71g',
+    images: [{ data: 'AAAA', mime: 'image/jpeg' }, { data: 'BBBB', mime: 'image/png' }]
+  });
+  await ai.askAi({ text: 'a banana', images: [] });
+  assert.deepEqual(JSON.parse(calls[2].opts.body), { text: 'a banana' });
+  const five = Array.from({ length: 5 }, () => ({ base64: 'AAAA' }));
+  await ai.askAi({ text: '', images: five });
+  assert.equal(JSON.parse(calls[3].opts.body).images.length, ai.MAX_AI_PHOTOS);
+  assert.equal(JSON.parse(calls[3].opts.body).images[0].mime, 'image/jpeg');
+
   reply = () => new Response(JSON.stringify({ error: 'bad secret' }), { status: 401 });
   await assert.rejects(ai.askAi({ text: 'x' }), /rejected the secret/);
   assert.equal(store.state.ai.lastError, 'The helper rejected the secret');

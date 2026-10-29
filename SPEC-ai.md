@@ -286,7 +286,35 @@ your own server; see the README for setup." Clearing both fields and saving turn
   and confirm an entry lands in the diary. Then ask the same thing again and confirm the card offers the
   food created the first time as "Already in your foods" instead of making a second one.
 
-## 8. Out of scope
+## 8. Several photos per ask (v1.6.1)
+
+A product usually needs two pictures: the front of the pack (name, brand, flavour) and the Nutrition Facts panel.
+Up to 4 photos go with one ask.
+
+Server:
+- Body gains `images: [{ "data": "<base64>", "mime": "image/jpeg"|"image/png" }, …]` (at most 4 entries, each
+  at most 4 MB of base64). The old `image` + `mime` pair still works as a one-photo shorthand; sending both is
+  a 400. `MAX_BODY` becomes 12 MB.
+- Files are written as `photo1.jpg`, `photo2.jpg`, … in the temp dir. Prompt line:
+  `Photos: ./photo1.jpg, ./photo2.jpg (use Read on each; they show the same food: packaging, nutrition panel, plate).`
+  The single-photo line stays as it was.
+- `system.txt` gains one paragraph: when a photo shows a Nutrition Facts panel, read the numbers from it
+  (confidence `label`, source "nutrition panel in photo") and take the product name, brand and flavour from the
+  other photos or the text; do not search the web when the panel is readable.
+- Log `image=yes` becomes `images=N`. Server `VERSION` 1.6.1.
+
+App:
+- `ctx.photos` (array, max 4) replaces `ctx.photo`. "Choose photo" input gets `multiple`. Both photo buttons
+  hide once 4 are attached. Thumbnails render in a row, each with its own remove button. Ask again re-sends all
+  of them.
+- `askAi({ text, images, signal })` sends `images: [{data, mime}]` (nothing when empty). `downscaleImage` is
+  applied to each file; a file that fails is skipped with a toast and the others stay.
+- APP_VERSION 1.6.1, sw VERSION v12.
+
+Tests: `validateBody` with `images` (count limit, bad entry, both forms given, shorthand still accepted);
+`buildPrompt` with several photos; `askAi` body shape with two images.
+
+## 9. Out of scope
 
 Queueing more than one job, Cloudflare Access, streaming progress, sending candidates to Claude, editing name
 and brand inline (use Edit details).

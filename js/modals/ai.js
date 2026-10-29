@@ -7,7 +7,8 @@ import { unitOptions, nutrientsFor, buildEntry } from '../foods.js';
 import { builtinFoods, loadBuiltinFoods } from '../builtin.js';
 import { packFoods, loadPacks } from '../packs.js';
 import {
-  aiConfigured, askAi, downscaleImage, foodFromAiItem, amountFromAiItem, confidenceLabel, findExisting, MAX_AI_TEXT
+  aiConfigured, askAi, downscaleImage, foodFromAiItem, amountFromAiItem, confidenceLabel, findExisting, MAX_AI_TEXT,
+  MAX_AI_PHOTOS
 } from '../ai.js';
 import { esc, fmt, fmtQty, parseNum, icon, on, openModal, closeModal, closeAllModals, toast, requestRender } from '../ui.js';
 import { openCustomFood } from './food.js';
@@ -66,7 +67,7 @@ export function openAiAdd({ date }) {
     date,
     meal: defaultMeal(date, meals),
     text: '',
-    photo: null, // { base64, mime } after downscaling; kept for Ask again, dropped on close
+    photos: [], // [{ base64, mime }] after downscaling (at most MAX_AI_PHOTOS); kept for Ask again, dropped on close
     phase: 'compose',
     error: '',
     items: [],
@@ -83,7 +84,7 @@ export function openAiAdd({ date }) {
       ctx.closed = true;
       if (ctx.abort) ctx.abort.abort();
       clearInterval(ctx.timer);
-      ctx.photo = null;
+      ctx.photos = [];
       ctx.items = [];
     }
   });
@@ -111,7 +112,7 @@ function render(ctx) {
   }
   if (ctx.phase === 'compose') {
     const ta = sheet.querySelector('textarea');
-    if (ta && !ctx.text && !ctx.photo) setTimeout(() => ta.focus(), 60);
+    if (ta && !ctx.text && !ctx.photos.length) setTimeout(() => ta.focus(), 60);
   }
 }
 
@@ -145,13 +146,24 @@ function composeHtml(ctx) {
       <p class="hint">AI add asks Claude, running on your own server, what you ate. See the README for setup.</p>
       <button type="button" class="btn btn-primary btn-block" data-action="ai-goto-settings">Open Settings</button>`;
   }
-  const canAsk = !!(ctx.text.trim() || ctx.photo);
-  const thumb = ctx.photo
-    ? `<div class="ai-thumb">
-        <img src="data:${esc(ctx.photo.mime)};base64,${ctx.photo.base64}" alt="Chosen photo">
-        <button type="button" class="icon-btn ai-thumb-remove" data-action="ai-photo-remove" aria-label="Remove photo">${icon('close')}</button>
+  const canAsk = !!(ctx.text.trim() || ctx.photos.length);
+  const thumbs = ctx.photos.length
+    ? `<div class="ai-thumbs">${ctx.photos.map((ph, k) => `
+        <div class="ai-thumb">
+          <img src="data:${esc(ph.mime)};base64,${esc(ph.base64)}" alt="Photo ${k + 1}">
+          <button type="button" class="icon-btn ai-thumb-remove" data-action="ai-photo-remove" data-k="${k}" aria-label="Remove photo ${k + 1}">${icon('close')}</button>
+        </div>`).join('')}
       </div>`
     : '';
+  const room = ctx.photos.length < MAX_AI_PHOTOS;
+  const buttons = room
+    ? `<label class="btn btn-ghost file-btn">${icon('camera')} Take photo
+          <input class="visually-hidden" type="file" accept="image/*" capture="environment" data-change="ai-photo">
+        </label>
+        <label class="btn btn-ghost file-btn">Choose photo
+          <input class="visually-hidden" type="file" accept="image/*" multiple data-change="ai-photo">
+        </label>`
+    : `<p class="muted small">${MAX_AI_PHOTOS} photos is the most per ask.</p>`;
   return `${head('AI add')}
     <form class="ai-compose" data-submit="ai-ask">
       ${mealSelect(ctx)}
@@ -159,13 +171,8 @@ function composeHtml(ctx) {
         <textarea name="text" rows="3" maxlength="${MAX_AI_TEXT}" autocomplete="off" placeholder="What did you eat? e.g. 71 g of Dot's pretzels" data-input="ai-text">${esc(ctx.text)}</textarea>
       </label>
       <div class="ai-photo-row">
-        ${thumb}
-        <label class="btn btn-ghost file-btn">${icon('camera')} Take photo
-          <input class="visually-hidden" type="file" accept="image/*" capture="environment" data-change="ai-photo">
-        </label>
-        <label class="btn btn-ghost file-btn">Choose photo
-          <input class="visually-hidden" type="file" accept="image/*" data-change="ai-photo">
-        </label>
+        ${thumbs}
+        ${buttons}
       </div>
       ${ctx.error ? `<p class="error inline-error" role="alert">${esc(ctx.error)}</p>` : ''}
       <button type="submit" class="btn btn-primary btn-block ai-ask-btn"${canAsk ? '' : ' disabled'}>${icon('sparkle')} Ask Claude</button>
@@ -378,7 +385,7 @@ async function ask(ctx, text) {
   // The matching pool (built-in list + packs) loads while Claude works.
   const poolReady = Promise.all([loadBuiltinFoods(), loadPacks()]).catch(() => {});
   try {
-    const data = await askAi({ text, image: ctx.photo, signal: ctrl.signal });
+    const data = await askAi({ text, images: ctx.photos, signal: ctrl.signal });
     await poolReady;
     if (ctx.closed || seq !== ctx.seq) return;
     const items = buildItems(data.items);
@@ -403,7 +410,7 @@ on('ai-text', (el) => {
   if (!ctx) return;
   ctx.text = el.value;
   const btn = ctx.bd.querySelector('.ai-ask-btn');
-  if (btn) btn.disabled = !(ctx.text.trim() || ctx.photo);
+  if (btn) btn.disabled = !(ctx.text.trim() || ctx.photos.length);
 });
 
 on('ai-meal', (el) => {
@@ -415,24 +422,30 @@ on('ai-meal', (el) => {
 
 on('ai-photo', async (el) => {
   const ctx = ctxOf(el);
-  const file = el.files && el.files[0];
-  if (!ctx || !file) return;
-  let photo;
-  try {
-    photo = await downscaleImage(file);
-  } catch (err) {
-    toast((err && err.message) || "Couldn't read that photo", { kind: 'error' });
-    return;
+  const files = el.files ? [...el.files] : [];
+  if (!ctx || !files.length) return;
+  const room = MAX_AI_PHOTOS - ctx.photos.length;
+  if (files.length > room) toast(`Up to ${MAX_AI_PHOTOS} photos per ask; using the first ${Math.max(room, 0)}`, { kind: 'error' });
+  // Each file is shrunk on its own: one that can't be read is skipped and the others stay.
+  const added = [];
+  for (const file of files.slice(0, Math.max(room, 0))) {
+    try {
+      added.push(await downscaleImage(file));
+    } catch (err) {
+      toast((err && err.message) || "Couldn't read that photo", { kind: 'error' });
+    }
   }
-  if (ctx.closed || ctx.phase !== 'compose') return;
-  ctx.photo = photo;
+  if (ctx.closed || ctx.phase !== 'compose' || !added.length) return;
+  // Another pick may have landed while these were shrinking: keep the cap.
+  ctx.photos = [...ctx.photos, ...added].slice(0, MAX_AI_PHOTOS);
   render(ctx);
 });
 
 on('ai-photo-remove', (el) => {
   const ctx = ctxOf(el);
   if (!ctx) return;
-  ctx.photo = null;
+  const k = Number(el.dataset.k);
+  ctx.photos = ctx.photos.filter((_, i) => i !== k);
   render(ctx);
 });
 
@@ -440,7 +453,7 @@ on('ai-ask', (form) => {
   const ctx = ctxOf(form);
   if (!ctx) return;
   const text = ctx.text.trim();
-  if (!text && !ctx.photo) return;
+  if (!text && !ctx.photos.length) return;
   ask(ctx, text);
 });
 

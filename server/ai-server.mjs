@@ -17,15 +17,17 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** Server version, reported by GET /v1/health (matches the app's APP_VERSION). */
-export const VERSION = '1.6.0';
+export const VERSION = '1.6.1';
 /** Largest accepted request body (bytes). */
-export const MAX_BODY = 6 * 1024 * 1024;
+export const MAX_BODY = 12 * 1024 * 1024;
 /** Longest accepted description. */
 export const MAX_TEXT = 2000;
 /** Most items returned per answer. */
 export const MAX_ITEMS = 8;
-/** Longest accepted base64 image string (the body limit caps it anyway). */
-export const MAX_IMAGE_CHARS = MAX_BODY;
+/** Longest accepted base64 string per photo. */
+export const MAX_IMAGE_CHARS = 4 * 1024 * 1024;
+/** Most photos per ask (front of the pack, nutrition panel, plate). */
+export const MAX_IMAGES = 4;
 /** Accepted image types → file extension written for Claude's Read tool. */
 export const MIME_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png' };
 /** Default CORS allow-list. */
@@ -33,6 +35,19 @@ export const DEFAULT_ORIGINS = 'https://zooksey.github.io,http://localhost:8766,
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOOLS = 'Read,WebSearch,WebFetch';
+/**
+ * Grocery retailer sites that stall automated fetches instead of refusing them: one such page cost a full
+ * 60 s tool timeout. Denied outright so a fetch fails at once and Claude moves on.
+ */
+export const BLOCKED_DOMAINS = [
+  'kroger.com', 'walmart.com', 'target.com', 'instacart.com', 'amazon.com', 'costco.com', 'samsclub.com',
+  'albertsons.com', 'safeway.com', 'heb.com', 'wegmans.com', 'publix.com', 'meijer.com', 'shipt.com',
+  'stopandshop.com', 'giantfood.com', 'hy-vee.com', 'frysfood.com', 'ralphs.com', 'fredmeyer.com'
+];
+/** Permission deny rules for BLOCKED_DOMAINS (bare and www forms). */
+export function blockedFetchRules() {
+  return BLOCKED_DOMAINS.flatMap((d) => [`WebFetch(domain:${d})`, `WebFetch(domain:www.${d})`]);
+}
 
 /** An error carrying the HTTP status (and optional detail) to answer with. */
 function httpError(status, message, detail) {
@@ -72,10 +87,24 @@ export function corsHeaders(origin, allowed) {
   };
 }
 
+const blank = (v) => v === undefined || v === null || v === '';
+
+/** One photo: base64 with whitespace removed (at most MAX_IMAGE_CHARS) and a mime (default image/jpeg). */
+function checkImage(data, rawMime, what) {
+  if (typeof data !== 'string' || !data) throw httpError(400, `${what} must be a base64 string`);
+  const b64 = data.replace(/\s+/g, '');
+  if (b64.length > MAX_IMAGE_CHARS) throw httpError(413, `${what} too large`);
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64) || b64.length % 4 === 1) throw httpError(400, `${what} must be plain base64 (no data: prefix)`);
+  const mime = blank(rawMime) ? 'image/jpeg' : rawMime;
+  if (!Object.prototype.hasOwnProperty.call(MIME_EXT, mime)) throw httpError(400, 'mime must be image/jpeg or image/png');
+  return { data: b64, mime };
+}
+
 /**
- * Validate a parsed POST /v1/food body.
+ * Validate a parsed POST /v1/food body. Photos come as `images: [{data, mime}, ...]` (at most MAX_IMAGES), or as
+ * the one-photo shorthand `image` + `mime`; sending both forms is a 400.
  * @param {*} body
- * @returns {{text: string, image: string|null, mime: string|null}} text trimmed; image is base64 without whitespace
+ * @returns {{text: string, images: {data: string, mime: string}[]}} text trimmed; data is base64 without whitespace
  * @throws {{status:number, message:string}} 400 for bad input, 413 for an oversize image
  */
 export function validateBody(body) {
@@ -84,19 +113,22 @@ export function validateBody(body) {
   if (typeof rawText !== 'string') throw httpError(400, 'text must be a string');
   const text = rawText.trim();
   if (text.length > MAX_TEXT) throw httpError(400, `text is longer than ${MAX_TEXT} characters`);
-  let image = null;
-  let mime = null;
-  if (body.image !== undefined && body.image !== null && body.image !== '') {
-    if (typeof body.image !== 'string') throw httpError(400, 'image must be a base64 string');
-    const b64 = body.image.replace(/\s+/g, '');
-    if (b64.length > MAX_IMAGE_CHARS) throw httpError(413, 'image too large');
-    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64) || b64.length % 4 === 1) throw httpError(400, 'image must be plain base64 (no data: prefix)');
-    mime = body.mime === undefined || body.mime === null || body.mime === '' ? 'image/jpeg' : body.mime;
-    if (!Object.prototype.hasOwnProperty.call(MIME_EXT, mime)) throw httpError(400, 'mime must be image/jpeg or image/png');
-    image = b64;
+  const hasList = body.images !== undefined && body.images !== null;
+  const hasOne = !blank(body.image);
+  if (hasList && hasOne) throw httpError(400, 'send images or image, not both');
+  const images = [];
+  if (hasList) {
+    if (!Array.isArray(body.images)) throw httpError(400, 'images must be an array');
+    if (body.images.length > MAX_IMAGES) throw httpError(400, `send at most ${MAX_IMAGES} images`);
+    body.images.forEach((im, i) => {
+      if (!im || typeof im !== 'object' || Array.isArray(im)) throw httpError(400, `images[${i}] must be {data, mime}`);
+      images.push(checkImage(im.data, im.mime, `images[${i}]`));
+    });
+  } else if (hasOne) {
+    images.push(checkImage(body.image, body.mime, 'image'));
   }
-  if (!text && !image) throw httpError(400, 'send text, an image, or both');
-  return { text, image, mime };
+  if (!text && !images.length) throw httpError(400, 'send text, an image, or both');
+  return { text, images };
 }
 
 /**
@@ -114,6 +146,7 @@ export function buildArgs({ schemaJson, systemPath, model = 'sonnet', maxTurns =
     '--max-turns', String(Number(maxTurns) > 0 ? Math.round(Number(maxTurns)) : 10),
     '--tools', TOOLS,
     '--allowedTools', TOOLS,
+    '--disallowedTools', ...blockedFetchRules(),
     '--permission-mode', 'dontAsk',
     '--no-session-persistence',
     '--append-system-prompt-file', String(systemPath),
@@ -122,13 +155,17 @@ export function buildArgs({ schemaJson, systemPath, model = 'sonnet', maxTurns =
 }
 
 /**
- * The user message for a job.
- * @param {{text: string, photoName?: string|null}} o
+ * The user message for a job. One photo keeps the original "Photo:" line; several share one "Photos:" line.
+ * @param {{text: string, photoName?: string|null, photoNames?: string[]}} o
  * @returns {string}
  */
-export function buildPrompt({ text, photoName = null }) {
+export function buildPrompt({ text, photoName = null, photoNames = [] }) {
   const lines = [];
-  if (photoName) lines.push(`Photo: ./${photoName} (use Read to look at it).`);
+  const names = (photoNames && photoNames.length ? photoNames : [photoName]).filter(Boolean);
+  if (names.length === 1) lines.push(`Photo: ./${names[0]} (use Read to look at it).`);
+  else if (names.length > 1) {
+    lines.push(`Photos: ${names.map((n) => `./${n}`).join(', ')} (use Read on each; they show the same food: packaging, nutrition panel, plate).`);
+  }
   if (text) lines.push(`User says: "${text}"`);
   return lines.join('\n');
 }
@@ -338,12 +375,12 @@ export function createServer(cfg) {
     } catch {
       // keep '/'
     }
-    const info = { items: 0, textLen: 0, image: false };
+    const info = { items: 0, textLen: 0, images: 0 };
     const send = (status, obj) => {
       res.writeHead(status, { ...cors, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify(obj));
       const secs = ((Date.now() - t0) / 1000).toFixed(1);
-      if (pathname === '/v1/food') logLine([req.method, pathname, status, `${secs}s`, `items=${info.items}`, `text=${info.textLen}`, `image=${info.image ? 'yes' : 'no'}`]);
+      if (pathname === '/v1/food') logLine([req.method, pathname, status, `${secs}s`, `items=${info.items}`, `text=${info.textLen}`, `images=${info.images}`]);
       else logLine([req.method, pathname, status, `${secs}s`]);
     };
 
@@ -378,7 +415,7 @@ export function createServer(cfg) {
       return;
     }
     info.textLen = input.text.length;
-    info.image = !!input.image;
+    info.images = input.images.length;
     if (busy) {
       send(429, { error: 'busy' });
       return;
@@ -391,12 +428,13 @@ export function createServer(cfg) {
     let dir = null;
     try {
       dir = await mkdtemp(path.join(os.tmpdir(), 'mt-ai-'));
-      let photoName = null;
-      if (input.image) {
-        photoName = `photo.${MIME_EXT[input.mime]}`;
-        await writeFile(path.join(dir, photoName), Buffer.from(input.image, 'base64'));
+      // One photo keeps its old name (photo.jpg); several become photo1.jpg, photo2.png, ...
+      const multi = input.images.length > 1;
+      const photoNames = input.images.map((im, i) => `photo${multi ? i + 1 : ''}.${MIME_EXT[im.mime]}`);
+      for (let i = 0; i < input.images.length; i++) {
+        await writeFile(path.join(dir, photoNames[i]), Buffer.from(input.images[i].data, 'base64'));
       }
-      const prompt = buildPrompt({ text: input.text, photoName });
+      const prompt = buildPrompt({ text: input.text, photoNames });
       const args = ['-p', prompt, ...buildArgs({ schemaJson, systemPath, model: cfg.model, maxTurns: cfg.maxTurns })];
       const tRun = Date.now();
       const run = await runClaude(bin, args, { cwd: dir, timeoutMs: cfg.timeoutMs, env: childEnv() });

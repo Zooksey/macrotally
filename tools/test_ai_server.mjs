@@ -55,9 +55,43 @@ test('corsHeaders denies others', () => {
 
 // ---------- validateBody ----------
 test('validateBody accepts text, image, or both', () => {
-  assert.deepEqual(srv.validateBody({ text: '  71g of pretzels ' }), { text: '71g of pretzels', image: null, mime: null });
-  assert.deepEqual(srv.validateBody({ image: 'AAAA', mime: 'image/png' }), { text: '', image: 'AAAA', mime: 'image/png' });
-  assert.deepEqual(srv.validateBody({ text: 'x', image: 'AA\nAA' }), { text: 'x', image: 'AAAA', mime: 'image/jpeg' });
+  assert.deepEqual(srv.validateBody({ text: '  71g of pretzels ' }), { text: '71g of pretzels', images: [] });
+  assert.deepEqual(srv.validateBody({ image: 'AAAA', mime: 'image/png' }), { text: '', images: [{ data: 'AAAA', mime: 'image/png' }] });
+  assert.deepEqual(srv.validateBody({ text: 'x', image: 'AA\nAA' }), { text: 'x', images: [{ data: 'AAAA', mime: 'image/jpeg' }] });
+});
+test('validateBody: images list', () => {
+  const two = srv.validateBody({ text: 'x', images: [{ data: 'AAAA', mime: 'image/jpeg' }, { data: 'BB\nBB', mime: 'image/png' }] });
+  assert.deepEqual(two, { text: 'x', images: [{ data: 'AAAA', mime: 'image/jpeg' }, { data: 'BBBB', mime: 'image/png' }] });
+  // mime defaults to jpeg; an empty list with text is just text.
+  assert.deepEqual(srv.validateBody({ images: [{ data: 'AAAA' }] }).images, [{ data: 'AAAA', mime: 'image/jpeg' }]);
+  assert.deepEqual(srv.validateBody({ text: 'x', images: [] }), { text: 'x', images: [] });
+  assert.equal(status(() => srv.validateBody({ images: [] })), 400);
+});
+test('validateBody: images count limit', () => {
+  const pic = { data: 'AAAA', mime: 'image/jpeg' };
+  assert.equal(srv.MAX_IMAGES, 4);
+  assert.equal(srv.validateBody({ images: [pic, pic, pic, pic] }).images.length, 4);
+  assert.equal(status(() => srv.validateBody({ images: [pic, pic, pic, pic, pic] })), 400);
+});
+test('validateBody: bad images entry', () => {
+  const pic = { data: 'AAAA', mime: 'image/jpeg' };
+  assert.equal(status(() => srv.validateBody({ images: 'AAAA' })), 400);
+  assert.equal(status(() => srv.validateBody({ images: [pic, 'AAAA'] })), 400);
+  assert.equal(status(() => srv.validateBody({ images: [pic, null] })), 400);
+  assert.equal(status(() => srv.validateBody({ images: [[pic]] })), 400);
+  assert.equal(status(() => srv.validateBody({ images: [{ mime: 'image/jpeg' }] })), 400);
+  assert.equal(status(() => srv.validateBody({ images: [{ data: 42 }] })), 400);
+  assert.equal(status(() => srv.validateBody({ images: [{ data: 'AAAA', mime: 'image/gif' }] })), 400);
+  assert.equal(status(() => srv.validateBody({ images: [{ data: 'data:image/jpeg;base64,AAAA' }] })), 400);
+  assert.equal(status(() => srv.validateBody({ images: [pic, { data: 'A'.repeat(srv.MAX_IMAGE_CHARS + 4) }] })), 413);
+});
+test('validateBody: images and image together is a 400', () => {
+  const pic = { data: 'AAAA', mime: 'image/jpeg' };
+  assert.equal(status(() => srv.validateBody({ images: [pic], image: 'AAAA' })), 400);
+  assert.equal(status(() => srv.validateBody({ text: 'x', images: [], image: 'AAAA' })), 400);
+  // null / empty shorthand next to a list is not "both".
+  assert.equal(srv.validateBody({ images: [pic], image: null, mime: null }).images.length, 1);
+  assert.equal(srv.validateBody({ images: [pic], image: '' }).images.length, 1);
 });
 test('validateBody: missing both', () => {
   assert.equal(status(() => srv.validateBody({})), 400);
@@ -156,11 +190,36 @@ test('buildArgs contains the lockdown flags and never --bare', () => {
   assert.ok(args.includes('--safe-mode'));
   // No tool that could touch the machine.
   assert.ok(!args.some((a) => /Bash|Edit|Write/.test(a)));
+  // Retailer sites that stall fetches are denied (bare and www), right after --disallowedTools.
+  const di = args.indexOf('--disallowedTools');
+  assert.ok(di > 0);
+  const rules = args.slice(di + 1, args.indexOf('--permission-mode'));
+  assert.ok(rules.includes('WebFetch(domain:kroger.com)') && rules.includes('WebFetch(domain:www.kroger.com)'));
+  assert.equal(rules.length, srv.BLOCKED_DOMAINS.length * 2);
+  assert.ok(rules.every((r) => /^WebFetch\(domain:[a-z0-9.-]+\)$/.test(r)));
 });
 test('buildPrompt', () => {
   assert.equal(srv.buildPrompt({ text: '71g of these', photoName: 'photo.jpg' }), 'Photo: ./photo.jpg (use Read to look at it).\nUser says: "71g of these"');
   assert.equal(srv.buildPrompt({ text: 'a banana' }), 'User says: "a banana"');
   assert.equal(srv.buildPrompt({ text: '', photoName: 'photo.png' }), 'Photo: ./photo.png (use Read to look at it).');
+});
+test('buildPrompt with several photos', () => {
+  assert.equal(
+    srv.buildPrompt({ text: '71g of these', photoNames: ['photo1.jpg', 'photo2.jpg'] }),
+    'Photos: ./photo1.jpg, ./photo2.jpg (use Read on each; they show the same food: packaging, nutrition panel, plate).\nUser says: "71g of these"'
+  );
+  assert.equal(
+    srv.buildPrompt({ text: '', photoNames: ['photo1.jpg', 'photo2.png', 'photo3.jpg'] }),
+    'Photos: ./photo1.jpg, ./photo2.png, ./photo3.jpg (use Read on each; they show the same food: packaging, nutrition panel, plate).'
+  );
+  // A one-entry list keeps the single-photo line.
+  assert.equal(srv.buildPrompt({ text: '', photoNames: ['photo.jpg'] }), 'Photo: ./photo.jpg (use Read to look at it).');
+  assert.equal(srv.buildPrompt({ text: 'a banana', photoNames: [] }), 'User says: "a banana"');
+});
+test('limits', () => {
+  assert.equal(srv.VERSION, '1.6.1');
+  assert.equal(srv.MAX_BODY, 12 * 1024 * 1024);
+  assert.equal(srv.MAX_IMAGE_CHARS, 4 * 1024 * 1024);
 });
 test('checkAuth', () => {
   const secret = 'testsecret12345678';

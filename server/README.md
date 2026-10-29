@@ -48,11 +48,11 @@ Check it from the Unraid shell:
 
 ```sh
 curl -H "Authorization: Bearer $AI_SECRET" http://localhost:8787/v1/health
-# {"ok":true,"version":"1.6.0","model":"sonnet"}
+# {"ok":true,"version":"1.6.1","model":"sonnet"}
 ```
 
 `docker compose logs -f` in that folder (or the container's log in the Unraid UI) shows one line per request: time, status,
-seconds, item count, text length and whether a photo was sent. The text, photo and token are never logged.
+seconds, item count, text length and number of photos (`images=N`). The text, photos and token are never logged.
 
 To update the CLI, rebuild: `docker compose build --no-cache && docker compose up -d`.
 
@@ -71,8 +71,10 @@ curl -H "Authorization: Bearer $AI_SECRET" https://ai.<domain>/v1/health
 ```
 
 The free Cloudflare plan is enough. Cloudflare's proxy gives up on a request after 100 seconds, which is why the
-server stops Claude after 85 s (`AI_TIMEOUT_MS`); most answers take 10 to 40 s (the very first request after a
-rebuild can take over a minute while the CLI initialises).
+server stops Claude after 85 s (`AI_TIMEOUT_MS`); most answers take 10 to 30 s. Grocery retailer sites (Kroger,
+Walmart, Target, Instacart, Amazon and similar) stall automated fetches for a full minute instead of refusing
+them, so the server denies fetches to those domains (`BLOCKED_DOMAINS` in ai-server.mjs) and the prompt caps
+research at two searches and two fetches.
 
 Without the dashboard: for a tunnel that runs with a token (dashboard-managed), the same two things can be done
 over the API with a token that has **Account · Cloudflare Tunnel · Edit** and **Zone · DNS · Edit**:
@@ -84,7 +86,7 @@ over the API with a token that has **Account · Cloudflare Tunnel · Edit** and 
 ## 5. Connect the app
 
 In MacroTally: **Settings** → **AI helper** → URL `https://ai.<domain>`, the same secret as `AI_SECRET` →
-**Save** → **Test**. It should say "Connected · v1.6.0 · sonnet". The **AI add** button at the top of the diary
+**Save** → **Test**. It should say "Connected · v1.6.1 · sonnet". The **AI add** button at the top of the diary
 then works.
 
 If the app is hosted somewhere other than the default origins (your own GitHub Pages user, a custom domain), add
@@ -95,10 +97,15 @@ that origin (scheme + host, no path) to `ALLOWED_ORIGINS`, or the browser will b
 All responses are JSON. Every request except `OPTIONS` needs `Authorization: Bearer <AI_SECRET>` (else 401
 `{"error":"bad secret"}`).
 
-- `GET /v1/health` → `{"ok":true,"version":"1.6.0","model":"sonnet"}`
-- `POST /v1/food` with `{ "text": "71g of these", "image": "<base64, no data: prefix>", "mime": "image/jpeg" }`
-  (text up to 2000 characters, body up to 6 MB, at least one of text or image) →
+- `GET /v1/health` → `{"ok":true,"version":"1.6.1","model":"sonnet"}`
+- `POST /v1/food` with
+  `{ "text": "71g of these", "images": [{ "data": "<base64, no data: prefix>", "mime": "image/jpeg" }, ...] }`
+  (text up to 2000 characters; up to 4 images, each up to 4 MB of base64, `mime` `image/jpeg` or `image/png`;
+  body up to 12 MB; at least one of text or an image) →
   `{ "items": [...], "model": "sonnet", "seconds": 19.4 }`. Each item follows `schema.json`.
+  Several photos are taken to show the same food (say the front of the pack and the Nutrition Facts panel).
+  The older one-photo form `{ "text": "...", "image": "<base64>", "mime": "image/jpeg" }` still works; sending
+  both `image` and `images` is a 400.
   Errors: 400 bad input, 413 too large, 429 `{"error":"busy"}` (one job at a time, no queue), 502
   `{"error":"no result","detail":"..."}`, 504 `{"error":"timeout"}`.
 

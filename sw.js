@@ -1,7 +1,7 @@
 /* MacroTally service worker: precached app shell, network-first for same-origin GETs. */
 
 /** Bump to invalidate old caches. */
-const VERSION = 'v11';
+const VERSION = 'v12';
 const CACHE = `macrotally-${VERSION}`;
 
 /** App shell, relative to the service worker scope (works from a sub-path). */
