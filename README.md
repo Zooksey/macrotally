@@ -80,7 +80,7 @@ PowerShell: `$env:USDA_API_KEY='...'; node tools/build_foods.mjs`. Add `--dry` t
 
 ## Restaurant food packs
 
-A food pack is a restaurant menu as a JSON file. Its items are searched instantly alongside the built-in list, work offline and are logged per serving ("1 burrito"), since chains publish nutrition per item rather than per 100 g. Searching for the chain name finds them too, for example "taco bell burrito". The app ships with a Taco Bell pack (`data/packs/taco-bell.json`); the packs listed in `data/packs/index.json` are the built-in ones.
+A food pack is a restaurant menu as a JSON file. Its items are searched instantly alongside the built-in list, work offline and are logged per serving ("1 burrito"), since chains publish nutrition per item rather than per 100 g. Searching for the chain name finds them too, for example "taco bell burrito". The app ships with packs for Taco Bell, Applebee's, Arby's, Buffalo Wild Wings, Burger King, Chick-fil-A, Chili's, Chipotle, Cracker Barrel, Culver's, Dairy Queen, Domino's, Dunkin', Five Guys, IHOP, In-N-Out, Jack in the Box, Jersey Mike's, Jimmy John's, KFC, Little Caesars, McDonald's, Olive Garden, Panda Express, Panera Bread, Papa John's, Pizza Hut, Popeyes, Raising Cane's, Shake Shack, Sonic, Starbucks, Subway, Texas Roadhouse, Wendy's, Whataburger, Wingstop and Zaxby's (in `data/packs/`); the built-in packs are the files listed in `data/packs/index.json`.
 
 ### Building a pack
 
@@ -92,7 +92,13 @@ node tools/build_pack.mjs --nutritionix taco-bell --name "Taco Bell" --skip "Can
 
 (That is how the bundled Taco Bell pack is built: the 200 beers and wines of the Cantina locations would otherwise crowd the search results.)
 
-This writes `data/packs/<slug>.json`. Options: `--brand "..."` (defaults to the name; it is shown on every item and is searchable), `--out <file>` to write somewhere else, `--skip "Section A,Section B"` to leave whole menu sections out (exact section names as shown on the page, any letter case, separated by commas; a name that itself contains commas can be written as is, and the skipped names are recorded in the pack as `skipped`), `--dry` to print the item counts per menu section and the first 10 items without writing anything, and `--from <file.html>` to parse a copy of the menu page saved from your browser instead of downloading it (useful if the site refuses the request). Each item gets a serving label guessed from its name and section ("1 taco", "1 order", "1 drink (20 oz)", otherwise "1 serving").
+The bundled Starbucks pack keeps only the 2% milk and no-milk drinks in Tall, Grande and Venti (the "Skinny" and "Light" drinks, which are made with nonfat milk, stay), because every drink is listed once per size and milk and the full menu is 3,600 items:
+
+```sh
+node tools/build_pack.mjs --nutritionix starbucks --name "Starbucks" --drop '\b(whole|soy|coconut|almond|oat)\s*milk\b|\boatmilk\b' --drop '^(?!.*\b(skinny|light)\b).*\bnonfat milk\b' --drop ',\s*(short|kids?|trenta)$'
+```
+
+This writes `data/packs/<slug>.json`. Options: `--brand "..."` (defaults to the name; it is shown on every item and is searchable), `--out <file>` to write somewhere else, `--skip "Section A,Section B"` to leave whole menu sections out (exact section names as shown on the page, any letter case, separated by commas; a name that itself contains commas can be written as is, and the skipped names are recorded in the pack as `skipped`), `--drop "<regex>"` to leave out items whose name matches a JavaScript regular expression (any letter case; can be given more than once, and the expressions are recorded in the pack as `dropped`), `--dry` to print the item counts per menu section and the first 10 items without writing anything, and `--from <file.html>` to parse a copy of the menu page saved from your browser instead of downloading it (useful if the site refuses the request). Each item gets a serving label guessed from its name and section ("1 taco", "1 order", "1 drink (20 oz)", otherwise "1 serving").
 
 To ship a new pack with the app, add its file name to `data/packs/index.json` and to the `SHELL` list in `sw.js`, then bump `VERSION`.
 

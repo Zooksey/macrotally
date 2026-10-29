@@ -2,7 +2,8 @@
  * MacroTally — food packs: restaurant menus as searchable offline food lists (format `macrotally-pack/1`).
  * Bundled packs are listed in data/packs/index.json and loaded lazily once per session; user-imported packs
  * live in state.packs (raw pack JSON keyed by id, so backups carry them). A user pack with the same id as a
- * bundled pack overrides it.
+ * bundled pack overrides it. Packs whose id is in state.packsOff are switched off on this device: their foods are
+ * left out of packFoods() (so search skips them); foods already logged or saved in the library are untouched.
  */
 import { state, save } from './store.js';
 
@@ -25,9 +26,10 @@ let bundledFoods = new Map();
 /** In-flight or settled load; reset after a failure so a later call can retry. */
 let loading = null;
 let loaded = false;
-/** Cache of all converted foods, rebuilt when the bundled set or state.packs changes. */
+/** Cache of all converted foods, rebuilt when the bundled set, state.packs or state.packsOff changes. */
 let cache = null;
 let cacheUserRef = null;
+let cacheOffRef = null;
 
 /**
  * One validated pack food: `{ id, n, cat?, s: [label, grams|null], v: [kcal, p, c, f, fiber] }`, or null
@@ -144,19 +146,26 @@ function userPacks() {
   return out;
 }
 
-/** Rebuild the converted food list (bundled packs overridden by user packs with the same id). */
+/** Ids of the packs switched off on this device. */
+function offIds() {
+  return new Set(Array.isArray(state.packsOff) ? state.packsOff.filter((x) => typeof x === 'string') : []);
+}
+
+/** Rebuild the converted food list (bundled packs overridden by user packs with the same id; off packs left out). */
 function refresh() {
   const users = userPacks();
+  const off = offIds();
   const list = [];
-  for (const [id, foods] of bundledFoods) if (!users.has(id)) list.push(...foods);
-  for (const p of users.values()) list.push(...convertPack(p));
-  cache = { list, users };
+  for (const [id, foods] of bundledFoods) if (!users.has(id) && !off.has(id)) list.push(...foods);
+  for (const p of users.values()) if (!off.has(p.id)) list.push(...convertPack(p));
+  cache = { list, users, off };
   cacheUserRef = state.packs;
+  cacheOffRef = state.packsOff;
 }
 
 function current() {
-  // state is reassigned by backup restore / erase, so a different packs object means a rebuild.
-  if (!cache || cacheUserRef !== state.packs) refresh();
+  // state is reassigned by backup restore / erase, so a different packs object or packsOff array means a rebuild.
+  if (!cache || cacheUserRef !== state.packs || cacheOffRef !== state.packsOff) refresh();
   return cache;
 }
 
@@ -242,22 +251,22 @@ export function preloadPacks() {
 
 /**
  * Packs available on this device, sorted by name. A user pack overriding a bundled one is listed once,
- * as the user pack.
- * @returns {{id:string, name:string, count:number, generated:string, bundled:boolean}[]}
+ * as the user pack. enabled is false for a pack switched off on this device.
+ * @returns {{id:string, name:string, count:number, generated:string, bundled:boolean, enabled:boolean}[]}
  */
 export function listPacks() {
-  const { users } = current();
+  const { users, off } = current();
   const out = [];
   for (const p of bundled.values()) {
-    if (!users.has(p.id)) out.push({ id: p.id, name: p.name, count: (bundledFoods.get(p.id) || []).length, generated: p.generated, bundled: true });
+    if (!users.has(p.id)) out.push({ id: p.id, name: p.name, count: (bundledFoods.get(p.id) || []).length, generated: p.generated, bundled: true, enabled: !off.has(p.id) });
   }
-  for (const p of users.values()) out.push({ id: p.id, name: p.name, count: p.foods.length, generated: p.generated, bundled: false });
+  for (const p of users.values()) out.push({ id: p.id, name: p.name, count: p.foods.length, generated: p.generated, bundled: false, enabled: !off.has(p.id) });
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
  * Import a pack from JSON text: validates it, stores it in state.packs (replacing an older copy with the
- * same id, and overriding a bundled pack with that id), saves and refreshes the food list.
+ * same id, overriding a bundled pack with that id, and switching the id back on if it was off), saves and refreshes.the food list.
  * @param {string} text
  * @returns {{id:string, name:string, count:number}}
  * @throws {Error} with a user-readable message when the file is not a valid pack or has no valid foods
@@ -273,6 +282,8 @@ export function importPack(text) {
   if (!pack.foods.length) throw new Error(`"${pack.name}" has no valid foods (each needs an id, a name and nutrition values).`);
   if (!isObj(state.packs)) state.packs = {};
   state.packs[pack.id] = pack;
+  // Importing is an explicit choice: a pack switched off under this id comes back on.
+  if (Array.isArray(state.packsOff) && state.packsOff.includes(pack.id)) state.packsOff = state.packsOff.filter((x) => x !== pack.id);
   save();
   refresh();
   return { id: pack.id, name: pack.name, count: pack.foods.length };
@@ -287,6 +298,27 @@ export function importPack(text) {
 export function removePack(id) {
   if (!isObj(state.packs) || !Object.prototype.hasOwnProperty.call(state.packs, id)) return false;
   delete state.packs[id];
+  save();
+  refresh();
+  return true;
+}
+
+/**
+ * Switch a pack (bundled or user) on or off on this device. Off packs are left out of packFoods(), so search
+ * skips them; foods already logged or saved in the library are untouched. Writes a new state.packsOff array
+ * (so the cache sees the change), saves and refreshes. An id that is neither a listed pack nor already off,
+ * or a pack already in the requested state, is a no-op.
+ * @param {string} id
+ * @param {boolean} on
+ * @returns {boolean} true when the setting changed
+ */
+export function setPackEnabled(id, on) {
+  const key = String(id || '');
+  const off = Array.isArray(state.packsOff) ? state.packsOff.filter((x) => typeof x === 'string') : [];
+  const isOff = off.includes(key);
+  if (!key || isOff === !on) return false;
+  if (!isOff && !listPacks().some((p) => p.id === key)) return false;
+  state.packsOff = on ? off.filter((x) => x !== key) : [...off, key];
   save();
   refresh();
   return true;

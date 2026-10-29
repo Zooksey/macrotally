@@ -269,6 +269,7 @@ async function runSearch(sheet, q, seq) {
   renderSearch(sheet);
 }
 
+let localTimer = null;
 function queueSearch(el, immediate) {
   const sheet = el.closest('.modal');
   if (!sheet) return;
@@ -280,9 +281,12 @@ function queueSearch(el, immediate) {
     hideResults(sheet);
     return;
   }
-  // Local results render on every keystroke; the network search waits for the debounce.
+  // Local results render after a short pause in typing (scoring ~17k built-in and pack foods costs tens of
+  // milliseconds on a phone); the network search waits for the longer debounce.
   sheet._search = { q, seq, api: null, loading: true, error: '' };
-  renderSearch(sheet);
+  clearTimeout(localTimer);
+  if (immediate) renderSearch(sheet);
+  else localTimer = setTimeout(() => { if (seq === searchSeq && sheet.isConnected && sheet._search) renderSearch(sheet); }, 120);
   if (!builtinFoods().length) {
     loadBuiltinFoods().then((list) => {
       if (list.length && seq === searchSeq && sheet.isConnected && sheet._search) renderSearch(sheet);

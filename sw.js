@@ -1,7 +1,7 @@
 /* MacroTally service worker: precached app shell, network-first for same-origin GETs. */
 
 /** Bump to invalidate old caches. */
-const VERSION = 'v7';
+const VERSION = 'v8';
 const CACHE = `macrotally-${VERSION}`;
 
 /** App shell, relative to the service worker scope (works from a sub-path). */
@@ -23,6 +23,43 @@ const SHELL = [
   './js/packs.js',
   './data/packs/index.json',
   './data/packs/taco-bell.json',
+  './data/packs/applebees.json',
+  './data/packs/arbys.json',
+  './data/packs/buffalo-wild-wings.json',
+  './data/packs/burger-king.json',
+  './data/packs/chick-fil-a.json',
+  './data/packs/chilis.json',
+  './data/packs/chipotle.json',
+  './data/packs/cracker-barrel.json',
+  './data/packs/culvers.json',
+  './data/packs/dairy-queen.json',
+  './data/packs/dominos.json',
+  './data/packs/dunkin.json',
+  './data/packs/five-guys.json',
+  './data/packs/ihop.json',
+  './data/packs/in-n-out.json',
+  './data/packs/jack-in-the-box.json',
+  './data/packs/jersey-mikes.json',
+  './data/packs/jimmy-johns.json',
+  './data/packs/kfc.json',
+  './data/packs/little-caesars.json',
+  './data/packs/mcdonalds.json',
+  './data/packs/olive-garden.json',
+  './data/packs/panda-express.json',
+  './data/packs/panera-bread.json',
+  './data/packs/papa-johns.json',
+  './data/packs/pizza-hut.json',
+  './data/packs/popeyes.json',
+  './data/packs/raising-canes.json',
+  './data/packs/shake-shack.json',
+  './data/packs/sonic.json',
+  './data/packs/starbucks.json',
+  './data/packs/subway.json',
+  './data/packs/texas-roadhouse.json',
+  './data/packs/wendys.json',
+  './data/packs/whataburger.json',
+  './data/packs/wingstop.json',
+  './data/packs/zaxbys.json',
   './js/scanner.js',
   './js/charts.js',
   './js/ui.js',

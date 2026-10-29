@@ -388,7 +388,7 @@ test('importPack: rejects bad input, stores a good pack (valid foods only), remo
   assert.deepEqual(pf.map((f) => f.id), ['pack:test-pack:1', 'pack:test-pack:2']);
   assert.equal(pf[0].servingOnly, true);
   assert.equal(pf[1].per100.cal, 50);
-  assert.deepEqual(packs.listPacks(), [{ id: 'test-pack', name: 'Test Diner', count: 2, generated: '2026-10-28', bundled: false }]);
+  assert.deepEqual(packs.listPacks(), [{ id: 'test-pack', name: 'Test Diner', count: 2, generated: '2026-10-28', bundled: false, enabled: true }]);
   // Re-import replaces the older copy.
   packs.importPack(packText({ name: 'Test Diner v2', foods: [{ id: '7', n: 'Shake', s: ['1 shake', null], v: [500, 10, 70, 20, 0] }] }));
   assert.deepEqual(packs.packFoods().map((f) => f.id), ['pack:test-pack:7']);
@@ -396,6 +396,13 @@ test('importPack: rejects bad input, stores a good pack (valid foods only), remo
   // Pack foods are found by brand + name.
   const hits = foods.searchLocal('test diner shake', { library: {}, builtin: packs.packFoods() });
   assert.deepEqual(hits.map((f) => f.id), ['pack:test-pack:7']);
+  // Importing again while the id is switched off switches it back on.
+  assert.equal(packs.setPackEnabled('test-pack', false), true);
+  assert.deepEqual(packs.packFoods(), []);
+  packs.importPack(packText());
+  assert.deepEqual(store.state.packsOff, []);
+  assert.equal(packs.packFoods().length, 2);
+  assert.equal(packs.listPacks()[0].enabled, true);
   assert.equal(packs.removePack('test-pack'), true);
   assert.equal(packs.removePack('test-pack'), false);
   assert.deepEqual(packs.packFoods(), []);
@@ -429,6 +436,17 @@ test('store: packs default + merge; backup restore takes packs from the backup, 
   // A backup with an empty packs object restores exactly that.
   store.importJSON(JSON.stringify({ version: 1, diary: {}, packs: {} }));
   assert.deepEqual(store.state.packs, {});
+  store.resetAll();
+});
+
+test('store: packsOff default + merge keeps an array of strings; backups carry it', () => {
+  store.resetAll();
+  assert.deepEqual(store.state.packsOff, []);
+  store.replaceState({ packsOff: 'junk' });
+  assert.deepEqual(store.state.packsOff, []);
+  store.replaceState({ packsOff: ['a', 3, null, '', 'b', 'a'] });
+  assert.deepEqual(store.state.packsOff, ['a', 'b']);
+  assert.deepEqual(JSON.parse(store.exportJSON()).packsOff, ['a', 'b']);
   store.resetAll();
 });
 
@@ -685,7 +703,7 @@ await testAsync('loadPacks: failures never throw (and retry), 404 → zero bundl
     assert.ok(urls.some((u) => u.endsWith('/data/packs/taco-bell.json')), urls.join(' '));
     assert.deepEqual(list.map((f) => f.id), ['pack:taco-bell:166727']);
     assert.equal(packs.packFoods(), list);
-    assert.deepEqual(packs.listPacks(), [{ id: 'taco-bell', name: 'Taco Bell', count: 1, generated: '2026-10-28', bundled: true }]);
+    assert.deepEqual(packs.listPacks(), [{ id: 'taco-bell', name: 'Taco Bell', count: 1, generated: '2026-10-28', bundled: true, enabled: true }]);
     await packs.loadPacks();
     packs.preloadPacks();
     assert.equal(urls.length, 3, 'loads once');
@@ -699,6 +717,49 @@ await testAsync('loadPacks: failures never throw (and retry), 404 → zero bundl
     console.warn = origWarn;
     store.resetAll();
   }
+});
+await testAsync('setPackEnabled: off packs leave packFoods() and listPacks() says so; on restores; unknown id no-op', async () => {
+  store.resetAll();
+  const tb = {
+    format: 'macrotally-pack/1', id: 'taco-bell', name: 'Taco Bell', brand: 'Taco Bell', generated: '2026-10-28',
+    foods: [{ id: '166727', n: 'Burrito Supreme - Beef', s: ['1 burrito', null], v: [390, 16, 52, 14, 8] }]
+  };
+  globalThis.fetch = async (u) => (String(u).endsWith('/index.json') ? jsonRes({ packs: ['taco-bell.json'] }) : jsonRes(tb));
+  await packs.loadPacks({ reload: true });
+  packs.importPack(packText());
+  const ids = () => packs.packFoods().map((f) => f.id).sort();
+  const enabled = () => Object.fromEntries(packs.listPacks().map((p) => [p.id, p.enabled]));
+  const all = ['pack:taco-bell:166727', 'pack:test-pack:1', 'pack:test-pack:2'];
+  assert.deepEqual(ids(), all);
+  assert.deepEqual(enabled(), { 'taco-bell': true, 'test-pack': true });
+  // Bundled pack off.
+  const before = store.state.packsOff;
+  assert.equal(packs.setPackEnabled('taco-bell', false), true);
+  assert.notEqual(store.state.packsOff, before, 'new array');
+  assert.deepEqual(store.state.packsOff, ['taco-bell']);
+  assert.deepEqual(ids(), ['pack:test-pack:1', 'pack:test-pack:2']);
+  assert.deepEqual(enabled(), { 'taco-bell': false, 'test-pack': true });
+  assert.deepEqual(JSON.parse(globalThis.localStorage.getItem(store.STORAGE_KEY)).packsOff, ['taco-bell'], 'saved');
+  // User pack off too; turning off twice is a no-op.
+  assert.equal(packs.setPackEnabled('test-pack', false), true);
+  assert.equal(packs.setPackEnabled('test-pack', false), false);
+  assert.deepEqual(packs.packFoods(), []);
+  assert.deepEqual(enabled(), { 'taco-bell': false, 'test-pack': false });
+  // Re-enabling restores.
+  assert.equal(packs.setPackEnabled('taco-bell', true), true);
+  assert.equal(packs.setPackEnabled('test-pack', true), true);
+  assert.deepEqual(ids(), all);
+  assert.deepEqual(store.state.packsOff, []);
+  // Unknown id: nothing changes.
+  const ref = store.state.packsOff;
+  assert.equal(packs.setPackEnabled('no-such-pack', false), false);
+  assert.equal(packs.setPackEnabled('no-such-pack', true), false);
+  assert.equal(store.state.packsOff, ref);
+  assert.deepEqual(ids(), all);
+  // A state swap (backup restore) with packsOff set is picked up without a setPackEnabled call.
+  store.replaceState({ ...JSON.parse(store.exportJSON()), packsOff: ['test-pack'] });
+  assert.deepEqual(ids(), ['pack:taco-bell:166727']);
+  store.resetAll();
 });
 globalThis.fetch = realFetch;
 

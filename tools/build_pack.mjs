@@ -4,9 +4,10 @@
 // Usage (from the project root):
 //   node tools/build_pack.mjs --nutritionix taco-bell --name "Taco Bell" [--brand "Taco Bell"]
 //                             [--out data/packs/taco-bell.json] [--skip "Section A,Section B"] [--dry]
-//                             [--from saved-page.html]
+//                             [--drop "<regex>"]... [--from saved-page.html]
 // --skip drops whole menu sections (comma-separated, case-insensitive exact names; recorded in the pack as
-// "skipped"). --from parses a saved copy of the page instead of fetching it. --dry prints per-section
+// "skipped"). --drop leaves out items whose cleaned name matches a case-insensitive JavaScript regex (may be
+// given more than once; recorded in the pack as "dropped"). --from parses a saved copy of the page instead of fetching it. --dry prints per-section
 // counts and the first 10 items instead of writing.
 //
 // The page is treated as untrusted data: it is only scanned with regular expressions and copied field by
@@ -30,6 +31,12 @@ const ENTITIES = {
 };
 
 /**
+ * Windows-1252 characters for numeric references 0x80-0x9F, as browsers decode them (HTML spec);
+ * some chain pages write e.g. "&#145;N" or "&#150;". Unassigned codes (0x81, 0x8D, 0x8F, 0x90, 0x9D) are dropped.
+ */
+const CP1252 = '€\0‚ƒ„…†‡ˆ‰Š‹Œ\0Ž\0\0‘’“”•–—˜™š›œ\0žŸ';
+
+/**
  * Decode HTML character references.
  * @param {string} s
  * @returns {string}
@@ -38,6 +45,7 @@ export function unescapeHtml(s) {
   return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (m, ref) => {
     if (ref[0] === '#') {
       const code = ref[1] === 'x' || ref[1] === 'X' ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
+      if (code >= 0x80 && code <= 0x9f) return CP1252[code - 0x80].replace('\0', '');
       return Number.isInteger(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
     }
     const ch = ENTITIES[ref.toLowerCase()];
@@ -49,7 +57,8 @@ export function unescapeHtml(s) {
 const textOf = (html) => unescapeHtml(html.replace(/<[^>]*>/g, ''));
 
 /**
- * Clean a menu item name: tags stripped, entities decoded, ®/™/U+FFFD removed, whitespace collapsed.
+ * Clean a menu item name: tags stripped, entities decoded, ®/™/U+FFFD removed, asterisk-wrapped markers
+ * ("*Local Specialty*") and stray footnote asterisks ("*Naked - Wing") removed, whitespace collapsed.
  * A mark glued between two words ("Tajín®Taco") becomes a space so the words stay apart.
  * @param {string} html
  * @returns {string}
@@ -58,6 +67,8 @@ export function cleanName(html) {
   return textOf(html)
     .replace(/(?<=[\p{L}\p{N}])[®™\uFFFD](?=[\p{L}\p{N}])/gu, ' ')
     .replace(/[®™\uFFFD]/gu, '')
+    .replace(/\*[^*]*\*/g, ' ')
+    .replace(/\*/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -148,20 +159,26 @@ export function sectionSkipped(name, tokens) {
  * rows are identified by the `-item-<id>-` part of the a.nmItem id (food id "<id>"), or by
  * `-ingredient-<id>-` (fountain drinks; food id "i<id>"). Rows without a calories value, with an id
  * already seen, or in a section named by `opts.skip` (tokens from splitSkip) are skipped; skipped
- * sections are still listed, with `skipped: true` and count 0.
+ * sections are still listed, with `skipped: true` and count 0. Rows whose cleaned name matches one of
+ * `opts.drop` (RegExp, or strings compiled case-insensitively) are left out and returned in `dropped`;
+ * like skipped rows, they do not claim their id, and section counts include kept rows only.
  * @param {string} html
- * @param {{ skip?: string[] }} [opts]
- * @returns {{ foods: PackFood[], sections: PackSection[] }}
+ * @param {{ skip?: string[], drop?: (string|RegExp)[] }} [opts]
+ * @returns {{ foods: PackFood[], sections: PackSection[], dropped: { id: string, n: string, cat?: string }[] }}
  */
 export function parseNutritionixMenu(html, opts = {}) {
   const skip = Array.isArray(opts.skip) ? opts.skip.map((t) => String(t).trim().toLowerCase()) : [];
+  const drop = (Array.isArray(opts.drop) ? opts.drop : [])
+    .map((r) => (r instanceof RegExp ? new RegExp(r.source, r.flags.replace(/[gy]/g, '')) : new RegExp(String(r), 'i')));
+  /** @type {{ id: string, n: string, cat?: string }[]} */
+  const dropped = [];
   const thead = /<thead\b[^>]*>([\s\S]*?)<\/thead>/i.exec(html);
   if (!thead) throw new Error('No <thead> found: is this a Nutritionix menu page?');
   /** @type {Record<string, number>} */
   const col = {};
   const ths = thead[1].match(/<th\b[\s\S]*?<\/th>/gi) || [];
   ths.forEach((th, i) => {
-    const m = /[?&]sort=([a-z_]+)/i.exec(th);
+    const m = /(?:[?&]|&amp;)sort=([a-z_]+)/i.exec(th);
     if (m && !(m[1] in col)) col[m[1]] = i;
   });
   const missing = NEEDED.filter((k) => !(k in col));
@@ -206,6 +223,10 @@ export function parseNutritionixMenu(html, opts = {}) {
     if (kcalCell === undefined || !textOf(kcalCell.replace(/^<td\b[^>]*>|<\/td>$/gi, '')).trim()) continue;
     const kcal = cell('calories');
     if (kcal === null) continue;
+    if (drop.some((re) => re.test(n))) {
+      dropped.push(section ? { id, n, cat: section.name } : { id, n });
+      continue;
+    }
     seen.add(id);
     const v = [kcal, cell('protein') ?? 0, cell('total_carb') ?? 0, cell('total_fat') ?? 0, cell('fibers') ?? 0];
     /** @type {[string, null]} */
@@ -213,19 +234,19 @@ export function parseNutritionixMenu(html, opts = {}) {
     if (section) section.count++;
     foods.push(section ? { id, n, cat: section.name, s, v } : { id, n, s, v });
   }
-  return { foods, sections };
+  return { foods, sections, dropped };
 }
 
 // ---------- CLI ----------
 
 /**
- * Minimal `--key value` / `--flag` parser.
+ * Minimal `--key value` / `--flag` parser; `--drop` may repeat and is collected into an array.
  * @param {string[]} argv
- * @returns {Record<string, string|boolean>}
+ * @returns {Record<string, string|boolean|string[]>}
  */
 function parseArgs(argv) {
-  /** @type {Record<string, string|boolean>} */
-  const out = {};
+  /** @type {Record<string, string|boolean|string[]>} */
+  const out = { drop: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (!a.startsWith('--')) throw new Error(`Unexpected argument: ${a}`);
@@ -233,14 +254,15 @@ function parseArgs(argv) {
     if (key === 'dry') { out.dry = true; continue; }
     const val = argv[i + 1];
     if (val === undefined || val.startsWith('--')) throw new Error(`--${key} needs a value`);
-    out[key] = val;
+    if (key === 'drop') /** @type {string[]} */ (out.drop).push(val);
+    else out[key] = val;
     i++;
   }
   return out;
 }
 
 const USAGE = 'Usage: node tools/build_pack.mjs --nutritionix <slug> --name "<Chain name>" [--brand "<Brand>"] ' +
-  '[--out data/packs/<slug>.json] [--skip "Section A,Section B"] [--dry] [--from saved-page.html]';
+  '[--out data/packs/<slug>.json] [--skip "Section A,Section B"] [--drop "<regex>"]... [--dry] [--from saved-page.html]';
 
 async function main() {
   let args;
@@ -262,6 +284,15 @@ async function main() {
   const out = typeof args.out === 'string' ? resolve(args.out) : resolve(ROOT, 'data', 'packs', `${slug}.json`);
   const url = `https://www.nutritionix.com/${slug}/menu/premium`;
   const skip = typeof args.skip === 'string' ? splitSkip(args.skip) : [];
+  const dropArgs = /** @type {string[]} */ (args.drop);
+  for (const r of dropArgs) {
+    try {
+      new RegExp(r, 'i');
+    } catch (err) {
+      console.error(`--drop is not a valid regular expression: ${err.message}`);
+      process.exit(1);
+    }
+  }
 
   let html;
   if (typeof args.from === 'string') {
@@ -286,12 +317,12 @@ async function main() {
 
   let parsed;
   try {
-    parsed = parseNutritionixMenu(html, { skip });
+    parsed = parseNutritionixMenu(html, { skip, drop: dropArgs });
   } catch (err) {
     console.error(err.message);
     process.exit(1);
   }
-  const { foods, sections } = parsed;
+  const { foods, sections, dropped } = parsed;
   const skipped = sections.filter((s) => s.skipped).map((s) => s.name);
   const unmatched = skip.filter((t) => !skipped.some((n) => n.toLowerCase().split(',').map((p) => p.trim()).includes(t) ||
     n.toLowerCase() === t));
@@ -305,6 +336,7 @@ async function main() {
   for (const s of sections) console.log(`  ${s.skipped ? ' skip' : String(s.count).padStart(5)}  ${s.name}`);
   const noSection = foods.filter((f) => !f.cat).length;
   if (noSection) console.log(`  ${String(noSection).padStart(5)}  (no section)`);
+  if (dropArgs.length) console.log(`Dropped by --drop: ${dropped.length} items.`);
   console.log(`Total: ${foods.length} items.`);
 
   if (args.dry) {
@@ -329,6 +361,7 @@ async function main() {
     brand,
     source: url,
     ...(skipped.length ? { skipped } : {}),
+    ...(dropArgs.length ? { dropped: dropArgs } : {}),
     generated: new Date().toISOString().slice(0, 10),
     foods
   };

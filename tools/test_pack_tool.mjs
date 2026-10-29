@@ -68,6 +68,15 @@ test('parse: --skip drops sections (case-insensitive, names with commas work in 
   assert.deepEqual(p.sections.filter((s) => s.skipped).map((s) => s.name), ['Burritos', 'Cantina Beer, Wine and Spirits']);
   assert.equal(p.sections.find((s) => s.name === 'Burritos').count, 0);
 });
+test('parse: drop leaves out items by name regex (strings case-insensitive) and they do not claim ids', () => {
+  const p = parseNutritionixMenu(FIXTURE, { drop: ['margarita', /^lemonade$/i, 'BURRITO SUPREME - BEEF$'] });
+  // "Burrito Supreme - Beef" is dropped, so its later copy ("... again", not matched) keeps id 166727.
+  assert.deepEqual(p.foods.map((f) => f.id), ['100', '200', '700', '166727', '500', 'i100', 'i33441']);
+  assert.equal(p.foods.find((f) => f.id === '166727').n, 'Burrito Supreme - Beef again');
+  assert.deepEqual(p.dropped.map((d) => d.n), ['Burrito Supreme - Beef', 'House Margarita', 'Lemonade', 'House Margarita (Drinks copy)']);
+  assert.equal(p.sections.find((s) => s.name === 'Burritos').count, 1);
+  assert.deepEqual(parseNutritionixMenu(FIXTURE, { drop: [] }).foods, parsed.foods);
+});
 test('sectionSkipped: exact names only', () => {
   assert.equal(sectionSkipped('Cantina Beer, Wine and Spirits', splitSkip('Cantina Beer, Wine and Spirits')), true);
   assert.equal(sectionSkipped('Cantina Beer, Wine and Spirits', splitSkip('Cantina Beer')), false);
@@ -77,6 +86,12 @@ test('sectionSkipped: exact names only', () => {
 });
 test('parse: columns mapped from thead order, v = [kcal, protein, carbs, fat, fiber]', () => {
   assert.deepEqual(byId['166727'].v, [390, 16, 52, 14, 8]);
+});
+test('parse: sort links with an HTML-escaped "&amp;sort=" query are recognised', () => {
+  // Some chain pages (e.g. mcdonalds) link the columns as "?desktop=&amp;sort=calories".
+  const escaped = FIXTURE.replace(/premium\?sort=/g, 'premium?desktop=&amp;sort=');
+  assert.notEqual(escaped, FIXTURE);
+  assert.deepEqual(parseNutritionixMenu(escaped).foods, parsed.foods);
 });
 test('parse: comma values and "<1" cells', () => {
   assert.deepEqual(byId['200'].v, [1230, 40, 150, 50, 0.5]);
@@ -139,6 +154,15 @@ test('cleanName and cellValue helpers', () => {
   assert.equal(cleanName('Crunchy Taco Supreme&reg;'), 'Crunchy Taco Supreme');
   assert.equal(cleanName('Cheesy Bean &amp; Rice Burrito (V)'), 'Cheesy Bean & Rice Burrito (V)');
   assert.equal(cleanName('Bad\uFFFD Byte  Name '), 'Bad Byte Name');
+  // Windows-1252 numeric references (seen on arbys, dairy-queen) decode like a browser, not to C1 controls.
+  assert.equal(cleanName('Beef &#145;N Cheddar'), 'Beef \u2018N Cheddar');
+  assert.equal(cleanName('Kickin&#146; Chicken'), 'Kickin\u2019 Chicken');
+  assert.equal(cleanName('Breakfast Bowl &#150; Gravy'), 'Breakfast Bowl \u2013 Gravy');
+  assert.equal(cleanName('Odd&#129;Code'), 'OddCode');
+  // Asterisk-wrapped markers (pizza-hut "*Local Specialty*") are removed.
+  assert.equal(cleanName('Taco Pizza *Local Specialty* - Large Slice'), 'Taco Pizza - Large Slice');
+  assert.equal(cleanName('*New* Cheesy Bites'), 'Cheesy Bites');
+  assert.equal(cleanName('*Naked - Traditional Bone-In Wing'), 'Naked - Traditional Bone-In Wing');
   assert.equal(cellValue('1,160'), 1160);
   assert.equal(cellValue('<span class="less-than">&lt;</span>1'), 0.5);
   assert.equal(cellValue('  '), 0);

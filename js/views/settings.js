@@ -5,7 +5,7 @@ import { REGIONS } from '../foods.js';
 import { esc, fmt, parseNum, on, toast, requestRender, confirmDialog } from '../ui.js';
 import { nav } from '../app.js';
 import { openSetup } from '../modals/setup.js';
-import { listPacks, importPack, removePack, loadPacks, packsLoaded } from '../packs.js';
+import { listPacks, importPack, removePack, setPackEnabled, loadPacks, packsLoaded } from '../packs.js';
 import { driveConfigured, loadGIS, connectDrive, disconnectDrive, backupNow, fetchBackup, applyBackup } from '../drive.js';
 
 import { APP_VERSION, checkForUpdate, updateAvailable } from '../update.js';
@@ -102,7 +102,7 @@ function installCard() {
   return `<section class="card"><h2>Install</h2>${body}</section>`;
 }
 
-/** "Food packs" card: bundled and imported restaurant menus, plus the import button. */
+/** "Food packs" card: bundled and imported restaurant menus (each with an on/off switch), plus the import button. */
 function packsCard() {
   if (!packsLoaded()) {
     // Bundled packs load in the background; re-render once (only if that load succeeds, so no retry loop).
@@ -111,8 +111,10 @@ function packsCard() {
     });
   }
   const packs = listPacks();
+  const onCount = packs.filter((pk) => pk.enabled).length;
   const rows = packs.map((pk) => `
-      <div class="pack-row">
+      <div class="pack-row${pk.enabled ? '' : ' is-off'}">
+        <label class="pack-toggle"><input type="checkbox" class="switch" data-change="toggle-pack" data-id="${esc(pk.id)}" aria-label="On: ${esc(pk.name)}"${pk.enabled ? ' checked' : ''}><span>On</span></label>
         <div class="pack-main">
           <div class="pack-name">${esc(pk.name)}</div>
           <div class="muted small">${esc(plural(pk.count, 'item'))}${pk.generated ? ` · updated ${esc(pk.generated)}` : ''}${pk.bundled ? ' · built in' : ''}</div>
@@ -121,12 +123,12 @@ function packsCard() {
       </div>`).join('');
   return `
     <section class="card">
-      <h2>Food packs</h2>
+      <div class="card-head"><h2>Food packs</h2>${packs.length ? `<span class="muted small">${fmt(onCount)} of ${fmt(packs.length)} on</span>` : ''}</div>
       ${packs.length ? `<div class="pack-list">${rows}</div>` : '<p class="muted small">No food packs yet.</p>'}
       <label class="btn btn-ghost btn-block file-btn">Import food pack
         <input class="visually-hidden" type="file" accept=".json,application/json" data-change="import-pack">
       </label>
-      <p class="hint">A pack is a JSON file of menu items (see README). Imported packs are stored on this device and included in backups.</p>
+      <p class="hint">A pack is a JSON file of menu items (see README). Imported packs are stored on this device and included in backups. Switch off the chains you never visit to keep search results short.</p>
     </section>`;
 }
 
@@ -438,6 +440,11 @@ on('remove-pack', async (el) => {
   if (!ok) return;
   removePack(id);
   toast(`Removed ${pk.name}`);
+  requestRender();
+});
+
+on('toggle-pack', (el) => {
+  setPackEnabled(el.dataset.id, el.checked);
   requestRender();
 });
 

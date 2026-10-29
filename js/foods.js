@@ -400,13 +400,28 @@ function stem(w) {
   return w;
 }
 
+/** One-entry memo for the query's tokens: a search scores every one of ~17k foods against the same query. */
+let lastQuery = null;
+let lastQueryTokens = [];
+function queryTokens(query) {
+  if (query !== lastQuery) {
+    lastQuery = query;
+    lastQueryTokens = tokenize(query);
+  }
+  return lastQueryTokens;
+}
+
 /** Per-food token cache (keyed by object; food objects are not mutated while listed). */
 const tokenCache = new WeakMap();
 
 function foodTokens(food) {
   let t = tokenCache.get(food);
   if (!t) {
-    t = { name: tokenize(food.name), brand: tokenize(food.brand) };
+    const name = tokenize(food.name);
+    const brand = tokenize(food.brand);
+    // text: every match rule below is a substring test on a name or brand token, so a query word that is
+    // not a substring of this string cannot match at all (fast reject for the ~17k foods scored per search).
+    t = { name, brand, text: ` ${name.join(' ')} ${brand.join(' ')} ` };
     tokenCache.set(food, t);
   }
   return t;
@@ -436,9 +451,10 @@ function foodTokens(food) {
  * @returns {number}
  */
 export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new Set(), recentIds = new Set() } = {}) {
-  const q = tokenize(query);
+  const q = queryTokens(query);
   if (!q.length || !food || typeof food !== 'object') return 0;
-  const { name, brand } = foodTokens(food);
+  const { name, brand, text } = foodTokens(food);
+  if (!q.some((t0) => text.includes(t0) || (SYNONYMS[t0] || []).some((t) => text.includes(t)))) return 0;
   let score = 0;
   let matched = 0;
   let early = true; // every query word found within the first q.length + 1 name words

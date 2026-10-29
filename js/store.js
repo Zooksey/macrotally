@@ -87,6 +87,8 @@ export function defaults() {
     meals: ['Breakfast', 'Lunch', 'Dinner', 'Snacks'],
     // User-imported food packs (raw macrotally-pack/1 JSON keyed by pack id); see js/packs.js.
     packs: {},
+    // Ids of food packs (bundled or user) switched off on this device: not searched; see js/packs.js.
+    packsOff: [],
     // Google Drive backup connection. Belongs to this device: kept as-is when a backup is imported.
     drive: {
       connected: false,
@@ -117,6 +119,7 @@ function merge(obj) {
   if (!isObj(out.foods)) out.foods = {};
   if (!isObj(out.diary)) out.diary = {};
   if (!isObj(out.packs)) out.packs = {};
+  out.packsOff = Array.isArray(out.packsOff) ? [...new Set(out.packsOff.filter((x) => typeof x === 'string' && x))] : [];
   return out;
 }
 

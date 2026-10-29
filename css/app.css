@@ -454,6 +454,22 @@ svg {
   flex: none;
 }
 
+/* Per-pack on/off checkbox before the name (44 px tap target; native check look as in .check-row). */
+.pack-toggle {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.pack-row.is-off .pack-main {
+  opacity: 0.55;
+}
+
 /* ---------- Forms ---------- */
 
 .field {
@@ -524,7 +540,8 @@ input[type="checkbox"] {
   cursor: pointer;
 }
 
-.check-row input[type="checkbox"] {
+.check-row input[type="checkbox"],
+.pack-toggle input[type="checkbox"] {
   appearance: auto;
   -webkit-appearance: checkbox;
   flex: none;

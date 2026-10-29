@@ -122,3 +122,23 @@ node tools/build_pack.mjs --nutritionix taco-bell --name "Taco Bell" [--brand "T
   servingOnly has no g/oz, `buildEntry` carries `servingOnly`, `makeCustomFood` without grams.
 - `tools/test_pack_tool.mjs` (new, same style): `parseNutritionixMenu` on an inline fixture with a
   subCategory row, a `<1` cell, a comma value and a duplicate id.
+
+## 9. Many bundled chains: per-pack on/off switch (v1.3.0)
+
+With ~30 bundled chains, search results for "chicken sandwich" would list every chain. Each pack can be
+switched off on the device; off packs are not searched and not listed in result lists, but foods already
+logged or saved in the library are untouched.
+
+- store.js: `packsOff: []` default (array of pack ids, bundled or user); `merge` ensures array of strings.
+  Backups carry it (plain state field, no special handling).
+- packs.js: `refresh()` excludes packs whose id is in `state.packsOff` from `cache.list`; cache is also
+  invalidated when `state.packsOff` identity changes (compare like `cacheUserRef`), and `setPackEnabled(id, on)`
+  mutates `state.packsOff` (new array, so identity changes), saves and refreshes. `listPacks()` rows gain
+  `enabled: boolean`. `packFoods()` is the only accessor search uses, so nothing else changes.
+- settings.js "Food packs" card: each row gets a toggle `<input type="checkbox" class="switch" data-change="toggle-pack" data-id="...">`
+  (reuse the app's existing switch/checkbox styling if there is one; otherwise a plain checkbox with
+  label "On") before the name; the card header shows "N of M on". Bundled rows keep "built in"; user rows keep
+  Remove. Hint text adds: "Switch off the chains you never visit to keep search results short."
+- tests (tools/test_calc.mjs): `setPackEnabled(id,false)` removes that pack's foods from `packFoods()` and
+  `listPacks()` reports `enabled:false`; re-enabling restores; unknown id is a no-op.
+- sw.js VERSION -> `v8`, APP_VERSION -> `1.3.0` (done by the architect at the end, not by the agents).
