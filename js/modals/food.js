@@ -542,12 +542,13 @@ function num1(v) {
 
 /**
  * Open the custom food editor.
- * @param {{barcode?: string|null, food?: object|null, meal: string, date: string, entry?: object|null, name?: string, replace?: HTMLElement|null}} opts
- *   food → edit an existing custom food (keeps its id). entry/replace are internal: when editing from a detail sheet,
- *   that sheet is replaced and the entry stays in edit mode.
+ * @param {{barcode?: string|null, food?: object|null, meal: string, date: string, entry?: object|null, name?: string, replace?: HTMLElement|null, onSaved?: ((food: object) => void)|null}} opts
+ *   food → edit an existing custom food (keeps its id), or prefill from an unsaved one (e.g. Claude's, from AI add).
+ *   entry/replace are internal: when editing from a detail sheet, that sheet is replaced and the entry stays in edit
+ *   mode. onSaved runs after the food is saved, before the detail sheet opens.
  * @returns {HTMLElement} backdrop
  */
-export function openCustomFood({ barcode = null, food = null, meal, date, entry = null, name = '', replace = null } = {}) {
+export function openCustomFood({ barcode = null, food = null, meal, date, entry = null, name = '', replace = null, onSaved = null } = {}) {
   const s = food && food.servings && food.servings[0];
   // servingOnly foods: per100 already holds one serving of unknown weight, so grams stay blank.
   const servingOnly = !!(food && food.servingOnly);
@@ -589,12 +590,12 @@ export function openCustomFood({ barcode = null, food = null, meal, date, entry 
       </div>
       <label class="field"><span>Fiber (g)</span><input name="fiber" type="text" inputmode="decimal" autocomplete="off" value="${esc(val('fiber'))}"></label>
       <div class="btn-row">
-        ${food ? '<button type="button" class="btn btn-danger" data-action="custom-delete">Delete food</button>' : ''}
+        ${food && state.foods[food.id] ? '<button type="button" class="btn btn-danger" data-action="custom-delete">Delete food</button>' : ''}
         <button type="submit" class="btn btn-primary grow">Save food</button>
       </div>
     </form>`;
   const bd = openModal(html, { cls: 'custom-food' });
-  bd._ctx = { food, meal, date, entry, replace };
+  bd._ctx = { food, meal, date, entry, replace, onSaved };
   return bd;
 }
 
@@ -639,10 +640,12 @@ on('custom-save', (form) => {
     f: optNum(form.f),
     fiber: optNum(form.fiber)
   });
+  const existed = !!(ctx.food && state.foods[ctx.food.id]);
   saveFood(food);
   closeModal(backdropOf(form));
   if (ctx.replace) closeModal(ctx.replace);
-  toast(ctx.food ? 'Food updated' : 'Food saved');
+  toast(existed ? 'Food updated' : 'Food saved');
+  if (typeof ctx.onSaved === 'function') ctx.onSaved(food);
   openFoodDetail(food, { meal: ctx.meal, date: ctx.date, entry: ctx.entry });
 });
 

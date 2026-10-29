@@ -103,23 +103,28 @@ export function defaults() {
     },
     // Weigh-ins pulled from a GitHub gist that an iPhone Shortcut fills from Apple Health; see js/feed.js.
     // imported = { 'YYYY-MM-DD': kg } of the weigh-ins the feed wrote (never overwrites a typed weigh-in).
-    feed: { gistId: '', lastSync: null, lastCount: 0, lastError: null, imported: {} }
+    feed: { gistId: '', lastSync: null, lastCount: 0, lastError: null, imported: {} },
+    // AI helper (the owner's server running Claude; see js/ai.js and SPEC-ai.md). url + secret both set = on.
+    // lastOk = ISO time of the last answer; lastError = message of the last failed request.
+    ai: { url: '', secret: '', lastOk: null, lastError: null }
   };
 }
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/bank/drive/feed objects are merged too. */
+/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/bank/drive/feed/ai objects are merged too. */
 function merge(obj) {
   const out = Object.assign(defaults(), isObj(obj) ? obj : {});
   const d = defaults();
-  for (const k of ['profile', 'goal', 'expenditure', 'bank', 'drive', 'feed']) {
+  for (const k of ['profile', 'goal', 'expenditure', 'bank', 'drive', 'feed', 'ai']) {
     out[k] = Object.assign({}, d[k], isObj(out[k]) ? out[k] : {});
   }
   out.goal.manual = Object.assign({}, d.goal.manual, isObj(out.goal.manual) ? out.goal.manual : {});
   if (!isObj(out.bank.targets)) out.bank.targets = {};
   if (!isObj(out.feed.imported)) out.feed.imported = {};
   if (typeof out.feed.gistId !== 'string') out.feed.gistId = '';
+  for (const k of ['url', 'secret']) if (typeof out.ai[k] !== 'string') out.ai[k] = '';
+  for (const k of ['lastOk', 'lastError']) if (typeof out.ai[k] !== 'string') out.ai[k] = null;
   if (!Array.isArray(out.expenditure.history)) out.expenditure.history = [];
   if (!Array.isArray(out.weights)) out.weights = [];
   if (!Array.isArray(out.recents)) out.recents = [];

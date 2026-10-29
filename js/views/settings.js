@@ -1,5 +1,5 @@
 // MacroTally — Settings view: profile, food sources, food packs, meals, install, Google Drive backup, weight feed,
-// backup, about.
+// AI helper, backup, about.
 import { state, save, todayStr, exportJSON, importJSON, resetAll } from '../store.js';
 import { refreshExpenditure } from '../calc.js';
 import { REGIONS } from '../foods.js';
@@ -9,6 +9,7 @@ import { openSetup } from '../modals/setup.js';
 import { listPacks, importPack, removePack, setPackEnabled, loadPacks, packsLoaded } from '../packs.js';
 import { driveConfigured, loadGIS, connectDrive, disconnectDrive, backupNow, fetchBackup, applyBackup } from '../drive.js';
 import { syncWeightFeed, parseGistId } from '../feed.js';
+import { aiConfigured, normalizeUrl, testAi } from '../ai.js';
 
 import { APP_VERSION, checkForUpdate, updateAvailable } from '../update.js';
 
@@ -219,6 +220,41 @@ function feedCard() {
     </form>`;
 }
 
+/** Result line of the last "Test" tap ({ ok, text }), shown in the AI helper card until the next save. */
+let aiTestResult = null;
+
+/** "AI helper" card: URL + secret of the owner's Claude helper server, Test, and the last answer / error. */
+function aiCard() {
+  const a = state.ai;
+  const on = aiConfigured(state);
+  let status;
+  if (!on) status = '<p class="muted small">Not set up</p>';
+  else if (a.lastError) status = `<p class="small warn">Last error: ${esc(a.lastError)}</p>`;
+  else if (a.lastOk) status = `<p class="muted small">Last answer ${esc(relativeTime(a.lastOk))}</p>`;
+  else status = '<p class="muted small">No answers yet</p>';
+  const test = aiTestResult
+    ? `<p class="small ${aiTestResult.ok ? 'bank-pos' : 'warn'} ai-test-result" role="status">${esc(aiTestResult.text)}</p>`
+    : '';
+  return `
+    <form class="card" id="ai-helper" data-submit="save-ai">
+      <h2>AI helper</h2>
+      <p class="small">Lets <strong>AI add</strong> on the diary ask Claude what you ate, from a description or a photo of the label.</p>
+      <label class="field"><span>Helper URL</span>
+        <input name="aiUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(a.url)}" placeholder="https://ai.example.com">
+      </label>
+      <label class="field"><span>Secret</span>
+        <input name="aiSecret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(a.secret)}">
+      </label>
+      ${status}
+      ${test}
+      <div class="btn-stack">
+        <button type="submit" class="btn btn-primary btn-block">Save AI helper</button>
+        ${on ? '<button type="button" class="btn btn-ghost btn-block" data-action="ai-test">Test</button>' : ''}
+      </div>
+      <p class="hint">Runs Claude on your own server; see the README for setup. Clear both fields and save to turn it off.</p>
+    </form>`;
+}
+
 /**
  * Settings tab.
  * @returns {string} HTML
@@ -288,6 +324,8 @@ export function settingsView() {
 
     ${feedCard()}
 
+    ${aiCard()}
+
     <section class="card">
       <h2>Backup</h2>
       <p class="muted small">Your data lives only in this browser. Export a backup now and then, especially before clearing site data or switching phones.</p>
@@ -303,7 +341,7 @@ export function settingsView() {
     <section class="card about">
       <h2>About</h2>
       <p class="small">MacroTally is a free, open macro tracker: barcode scanning, trend weight and an adaptive expenditure estimate.</p>
-      <p class="small"><strong>Privacy:</strong> there is no server and no account. Everything you log stays on this device${driveConfigured() ? ' (plus your own Google Drive if you connect it)' : ''}. Food searches go directly to Open Food Facts and USDA FoodData Central.</p>
+      <p class="small"><strong>Privacy:</strong> there is no server and no account. Everything you log stays on this device${driveConfigured() ? ' (plus your own Google Drive if you connect it)' : ''}. Food searches go directly to Open Food Facts and USDA FoodData Central.${aiConfigured(state) ? ' AI add sends what you type and photograph to your own AI helper, which passes it to Claude.' : ''}</p>
       <p class="muted small">Version ${esc(APP_VERSION)} · Food data © Open Food Facts contributors (ODbL) and USDA FoodData Central</p>
       ${updateAvailable()
         ? '<button type="button" class="btn btn-primary btn-block" data-action="app-update">Reload to update</button>'
@@ -582,5 +620,48 @@ on('feed-sync', async (el) => {
   if (r && r.added + r.updated === 0) toast('No new weigh-ins');
   else if (!r) toast(state.feed.lastError ? `Sync failed: ${state.feed.lastError}` : 'Could not sync right now (offline?)', { kind: 'error' });
   // r with changes: syncWeightFeed already showed "N weigh-ins from the scale".
+  requestRender();
+});
+
+// ---------- AI helper ----------
+
+on('save-ai', (form) => {
+  const rawUrl = form.aiUrl.value.trim();
+  const secret = form.aiSecret.value.trim();
+  const a = state.ai;
+  aiTestResult = null;
+  if (!rawUrl && !secret) {
+    Object.assign(a, { url: '', secret: '', lastOk: null, lastError: null });
+    save();
+    toast('AI helper off');
+    requestRender();
+    return;
+  }
+  if (!rawUrl || !secret) {
+    toast(rawUrl ? 'Enter the secret too' : "Enter the helper's URL too", { kind: 'error' });
+    return;
+  }
+  let url;
+  try {
+    url = normalizeUrl(rawUrl);
+  } catch (err) {
+    toast(err.message, { kind: 'error' });
+    return;
+  }
+  if (url !== a.url || secret !== a.secret) Object.assign(a, { url, secret, lastOk: null, lastError: null });
+  save();
+  toast('AI helper saved');
+  requestRender();
+});
+
+on('ai-test', async (el) => {
+  el.disabled = true;
+  el.textContent = 'Testing…';
+  try {
+    const { version, model } = await testAi();
+    aiTestResult = { ok: true, text: `Connected · v${version} · ${model}` };
+  } catch (err) {
+    aiTestResult = { ok: false, text: (err && err.message) || "Can't reach the helper" };
+  }
   requestRender();
 });

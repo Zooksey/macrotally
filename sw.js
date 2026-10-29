@@ -1,7 +1,7 @@
 /* MacroTally service worker: precached app shell, network-first for same-origin GETs. */
 
 /** Bump to invalidate old caches. */
-const VERSION = 'v10';
+const VERSION = 'v11';
 const CACHE = `macrotally-${VERSION}`;
 
 /** App shell, relative to the service worker scope (works from a sub-path). */
@@ -66,12 +66,14 @@ const SHELL = [
   './js/app.js',
   './js/drive.js',
   './js/feed.js',
+  './js/ai.js',
   './js/views/diary.js',
   './js/views/weight.js',
   './js/views/plan.js',
   './js/views/settings.js',
   './js/modals/food.js',
-  './js/modals/setup.js'
+  './js/modals/setup.js',
+  './js/modals/ai.js'
 ];
 
 self.addEventListener('install', (event) => {

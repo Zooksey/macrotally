@@ -26,6 +26,7 @@ js/foods.js          Open Food Facts / USDA lookup + scaling (LOGIC)
 js/scanner.js        camera barcode scanning                 (LOGIC)
 js/charts.js         inline-SVG line + bar charts            (LOGIC)
 js/feed.js           weight feed: Apple Health → Shortcut → GitHub gist → weights (LOGIC)
+js/ai.js             AI add: helper-server client, Claude item → Food, duplicate matching (LOGIC; see SPEC-ai.md)
 js/ui.js             DOM helpers, action registry, modals    (UI)
 js/app.js            bootstrap, router, tab bar, render loop (UI)
 js/views/diary.js    (UI)
@@ -34,6 +35,8 @@ js/views/plan.js     (UI)
 js/views/settings.js (UI)
 js/modals/food.js    add-food search, food detail/amount, custom food editor, scanner modal (UI)
 js/modals/setup.js   first-run wizard (UI)
+js/modals/ai.js      AI add sheet: compose / waiting / result cards (UI; see SPEC-ai.md)
+server/              optional AI helper service (Node + Claude Code CLI; see SPEC-ai.md)
 icons/icon-192.png, icons/icon-512.png, icons/icon.svg
 tools/make_icons.py  generates the PNGs with only the Python stdlib (zlib/struct), no PIL
 README.md
@@ -396,6 +399,10 @@ System font stack. Body padding-bottom for tab bar + `env(safe-area-inset-bottom
 - `index.html` (UI): meta viewport with `viewport-fit=cover`, theme-color, apple-mobile-web-app-capable, apple-mobile-web-app-status-bar-style black-translucent, apple-touch-icon → `./icons/icon-192.png`, link manifest, `<div id="app"></div><nav id="tabbar"></nav><div id="modal-root"></div><div id="toast-root"></div>`, `<script type="module" src="./js/app.js">`.
 - `sw.js`: `const VERSION = 'v1'`; precache the app shell (index.html, css, all js, manifest, icons) on install; on activate delete old caches + `clients.claim()`; fetch: same-origin GET → network-first falling back to cache (so updates arrive but offline still works); cross-origin → network only (do not cache API calls, including the weight feed's api.github.com gist reads). Navigation requests fall back to cached `./index.html`. The SHELL list includes every module, `./js/feed.js` among them.
 - `tools/make_icons.py`: stdlib-only PNG writer producing 192 and 512 px icons: dark-green (#2e7d5b) rounded square with a white ring (like a macro ring) and a filled accent arc; also write `icons/icon.svg` equivalent. Run it once and commit the PNGs.
+
+## AI add (optional helper server)
+
+An optional "AI add" pill on the diary header (`js/modals/ai.js`, logic in `js/ai.js`) sends a description and/or a downscaled photo to a small HTTP service the owner runs on their own machine (`server/ai-server.mjs`, plain Node 22 in Docker behind a Cloudflare Tunnel). That service runs the Claude Code CLI headless (`claude -p --json-schema …`) on the owner's Claude subscription and returns a schema-validated list of food items. The app matches each item against its own foods (library, built-in list, enabled packs) with `rankFoods` plus a token-coverage and brand rule, compares the nutrients, and shows one confirm card per item, so an existing food is reused instead of duplicated; new items become custom foods. Settings holds `state.ai = { url, secret, lastOk, lastError }` (deep-merged like `feed`); nothing runs while url or secret is empty. This is the app's only server-side component and it is entirely optional. Full design, API, schema and tests: **SPEC-ai.md**.
 
 ## Testing checklist (reviewer runs)
 - Fresh load → setup wizard → diary shows targets.

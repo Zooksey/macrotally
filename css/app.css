@@ -1396,6 +1396,283 @@ input[type="checkbox"] {
 
 /* ---------- Animations ---------- */
 
+/* ---------- AI add ---------- */
+
+/* Diary header: title and the "AI add" pill share a row that wraps on narrow screens. */
+.date-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px 8px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.date-title-row h1 {
+  min-width: 0;
+}
+
+.ai-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 30px;
+  padding: 4px 11px 4px 8px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.ai-pill .icon {
+  width: 16px;
+  height: 16px;
+}
+
+.ai-pill:active {
+  transform: scale(0.97);
+}
+
+.ai-sheet textarea {
+  resize: vertical;
+  min-height: 84px;
+  line-height: 1.4;
+}
+
+.ai-photo-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.ai-photo-row .file-btn {
+  flex: 1 1 130px;
+}
+
+.ai-thumb {
+  position: relative;
+  flex: none;
+  width: 72px;
+  height: 72px;
+}
+
+.ai-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+}
+
+.ai-thumb .ai-thumb-remove {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--card);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+.ai-thumb .ai-thumb-remove .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ai-sheet .error {
+  margin: 0 0 10px;
+}
+
+.ai-wait {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 28px 0 12px;
+  text-align: center;
+}
+
+.spinner-lg {
+  width: 34px;
+  height: 34px;
+  border-width: 3px;
+  margin-bottom: 10px;
+}
+
+.ai-took {
+  margin: -6px 0 10px;
+}
+
+.ai-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin: 0 0 10px;
+}
+
+.ai-item.is-off > :not(.ai-item-head) {
+  opacity: 0.45;
+}
+
+.ai-item-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.ai-item-head .ai-check {
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: 2px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  accent-color: var(--accent);
+}
+
+.ai-item-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-item-title .row-title {
+  overflow-wrap: anywhere;
+}
+
+.ai-source {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  vertical-align: middle;
+  white-space: nowrap;
+  background: var(--card-2);
+  color: var(--muted);
+}
+
+.ai-badge.label {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ai-badge.web {
+  background: rgba(59, 130, 246, 0.14);
+  color: var(--p);
+}
+
+.ai-badge.estimate {
+  background: rgba(245, 158, 11, 0.16);
+  color: var(--warn);
+}
+
+.ai-match {
+  background: var(--card-2);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
+.ai-match p {
+  margin: 0;
+}
+
+.ai-match .link-btn {
+  padding-left: 0;
+  margin-top: 2px;
+}
+
+.ai-match .segmented {
+  margin: 8px 0 0;
+  background: var(--bg);
+}
+
+/* Claude vs stored mini table. */
+.ai-diff {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-diff th,
+.ai-diff td {
+  padding: 3px 4px;
+  text-align: right;
+  border-bottom: 1px solid var(--line);
+}
+
+.ai-diff th:first-child {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.ai-diff thead th {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ai-notes {
+  margin: 0 0 8px;
+}
+
+.ai-macros {
+  margin: -4px 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-macros .p {
+  color: var(--p);
+}
+
+.ai-macros .c {
+  color: var(--c);
+}
+
+.ai-macros .f {
+  color: var(--f);
+}
+
+.ai-item > .link-btn {
+  padding-left: 0;
+}
+
+.ai-again {
+  margin-top: 14px;
+}
+
+.ai-again .field {
+  margin-bottom: 0;
+}
+
 @keyframes slide-up {
   from {
     transform: translateY(100%);

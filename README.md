@@ -197,6 +197,30 @@ There is still no server: the gist lives in your own GitHub account and the app 
 - Weights without a unit are read in the units chosen in your profile. Lines the app cannot read (no date or no weight) are skipped.
 - To stop, empty the Gist id field and save. You can also delete the gist and the token on GitHub.
 
+## AI add (a Claude helper on your own server)
+
+The **AI add** button at the top of the diary lets you describe what you ate ("71 g of Dot's pretzels"), take or choose a photo of the package or plate, or both. Claude identifies each food, reads the nutrition label from the photo or looks it up on the web, and works out how much you had. You confirm the result before anything is logged.
+
+This is optional and off until you set it up. It needs:
+
+- a **Claude Pro or Max subscription** (Claude runs on your plan; there is no per-request bill), and
+- **your own server** to run the small helper service in `server/` (a home server such as Unraid behind a Cloudflare Tunnel works well; a PC is fine for trying it out). The app never talks to Claude directly and never holds your Claude login.
+
+Setting up the server (login token, Docker, Cloudflare Tunnel) is described in [server/README.md](server/README.md). Then, in the app:
+
+1. **Settings** → **AI helper** → enter the helper's URL (e.g. `https://ai.example.com`) and the secret you put in the server's `AI_SECRET`.
+2. Tap **Save AI helper**, then **Test**. It should say "Connected · v1.6.0 · sonnet".
+
+Using it: tap **AI add**, pick the meal, type and/or add a photo, tap **Ask Claude** and wait 20 to 40 seconds. You get one card per food with:
+
+- the name and brand, and where the numbers came from: **Label** (the manufacturer's label, from your photo or their site), **Web** (a third-party database) or **Estimate** (Claude's estimate);
+- a **duplicate check** against the foods you already have (your own foods, the built-in list and the restaurant packs). If the food is already there, the card says "Already in your foods" and logs that food, so no copy is created. If it looks like a stored food but the numbers differ, the card shows both sets of numbers side by side and lets you keep the stored food, update your own custom food with Claude's numbers, or add a corrected copy (built-in and pack foods are never changed). Otherwise it is marked **New food**;
+- the amount (adjust it if needed) with the calories and macros for it, and **Edit details** to change anything before saving.
+
+Untick anything you do not want, then tap **Add N to <meal>**. New foods are saved as custom foods, so next time a plain search finds them without asking Claude. If Claude got it wrong, type a correction under **Not right? Tell Claude** and tap **Ask again**.
+
+What you type and photograph goes to your helper server and from there to Claude; nothing else from the app is sent. To turn it off, clear both fields in Settings and save.
+
 ## Layout
 
 ```
@@ -210,11 +234,13 @@ js/scanner.js         camera barcode scanning
 js/charts.js          inline SVG charts
 js/drive.js           optional Google Drive backup (Google sign-in + Drive API)
 js/feed.js            optional weight feed (Apple Health via a Shortcut and a GitHub gist)
+js/ai.js              optional AI add (talks to your own Claude helper server)
 js/ui.js, js/app.js   rendering, routing, modals
 js/views/*.js         Diary, Weight, Plan, Settings screens
-js/modals/*.js        add food, food detail, custom food, scanner, setup wizard
+js/modals/*.js        add food, food detail, custom food, scanner, setup wizard, AI add
 sw.js                 service worker (offline app shell)
-tools/                icon generator and unit tests (`node tools/test_calc.mjs`, `node tools/test_feed.mjs`)
+server/               the optional AI helper service (Node + Claude Code CLI, Docker); see server/README.md
+tools/                icon generator and unit tests (`node tools/test_calc.mjs`, `node tools/test_feed.mjs`, `node tools/test_ai.mjs`, `node tools/test_ai_server.mjs`)
 ```
 
 See `SPEC.md` for the full design and the algorithms.

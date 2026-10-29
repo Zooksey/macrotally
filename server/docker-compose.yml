@@ -1,0 +1,9 @@
+services:
+  macrotally-ai:
+    build: .
+    env_file: .env
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
+    tmpfs:
+      - /tmp

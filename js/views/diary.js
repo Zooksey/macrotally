@@ -4,6 +4,7 @@ import { dayTotals, targets, bankStatus } from '../calc.js';
 import { esc, fmt, fmtQty, parseNum, dateLabel, icon, on, toast, requestRender } from '../ui.js';
 import { nav } from '../app.js';
 import { openAddFood, openFoodDetail } from '../modals/food.js';
+import { openAiAdd } from '../modals/ai.js';
 import { driveConfigured, backupDue } from '../drive.js';
 import { updateAvailable } from '../update.js';
 
@@ -153,7 +154,10 @@ export function diaryView() {
     <header class="topbar date-nav">
       <button type="button" class="icon-btn" data-action="diary-shift" data-days="-1" aria-label="Previous day">${icon('left')}</button>
       <div class="date-title">
-        <h1>${esc(dateLabel(date))}</h1>
+        <div class="date-title-row">
+          <h1>${esc(dateLabel(date))}</h1>
+          <button type="button" class="ai-pill" data-action="ai-add">${icon('sparkle')}<span>AI add</span></button>
+        </div>
         ${date !== today ? '<button type="button" class="link-btn" data-action="diary-today">Today</button>' : ''}
       </div>
       <button type="button" class="icon-btn" data-action="diary-shift" data-days="1" aria-label="Next day">${icon('right')}</button>
@@ -178,6 +182,10 @@ on('diary-today', () => {
 
 on('add-food', (el) => {
   openAddFood(el.dataset.meal, nav.date);
+});
+
+on('ai-add', () => {
+  openAiAdd({ date: nav.date });
 });
 
 on('edit-entry', (el) => {
