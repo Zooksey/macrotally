@@ -71,7 +71,15 @@ curl -H "Authorization: Bearer $AI_SECRET" https://ai.<domain>/v1/health
 ```
 
 The free Cloudflare plan is enough. Cloudflare's proxy gives up on a request after 100 seconds, which is why the
-server stops Claude after 85 s (`AI_TIMEOUT_MS`); most answers take 20 to 40 s.
+server stops Claude after 85 s (`AI_TIMEOUT_MS`); most answers take 10 to 40 s (the very first request after a
+rebuild can take over a minute while the CLI initialises).
+
+Without the dashboard: for a tunnel that runs with a token (dashboard-managed), the same two things can be done
+over the API with a token that has **Account · Cloudflare Tunnel · Edit** and **Zone · DNS · Edit**:
+`PUT /accounts/<account>/cfd_tunnel/<tunnel>/configurations` with the existing `config` plus an ingress rule
+`{ "hostname": "ai.<domain>", "service": "http://<unraid-ip>:8787" }` inserted before the catch-all, and
+`POST /zones/<zone>/dns_records` with `{ "type": "CNAME", "name": "ai", "content": "<tunnel>.cfargotunnel.com",
+"proxied": true }`. Ids come from `GET /zones` and `GET /accounts/<account>/cfd_tunnel?is_deleted=false`.
 
 ## 5. Connect the app
 
