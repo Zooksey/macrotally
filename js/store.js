@@ -100,21 +100,26 @@ export function defaults() {
       autoBackup: true,
       lastBackupAt: null,
       lastError: null
-    }
+    },
+    // Weigh-ins pulled from a GitHub gist that an iPhone Shortcut fills from Apple Health; see js/feed.js.
+    // imported = { 'YYYY-MM-DD': kg } of the weigh-ins the feed wrote (never overwrites a typed weigh-in).
+    feed: { gistId: '', lastSync: null, lastCount: 0, lastError: null, imported: {} }
   };
 }
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/bank/drive objects are merged too. */
+/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/bank/drive/feed objects are merged too. */
 function merge(obj) {
   const out = Object.assign(defaults(), isObj(obj) ? obj : {});
   const d = defaults();
-  for (const k of ['profile', 'goal', 'expenditure', 'bank', 'drive']) {
+  for (const k of ['profile', 'goal', 'expenditure', 'bank', 'drive', 'feed']) {
     out[k] = Object.assign({}, d[k], isObj(out[k]) ? out[k] : {});
   }
   out.goal.manual = Object.assign({}, d.goal.manual, isObj(out.goal.manual) ? out.goal.manual : {});
   if (!isObj(out.bank.targets)) out.bank.targets = {};
+  if (!isObj(out.feed.imported)) out.feed.imported = {};
+  if (typeof out.feed.gistId !== 'string') out.feed.gistId = '';
   if (!Array.isArray(out.expenditure.history)) out.expenditure.history = [];
   if (!Array.isArray(out.weights)) out.weights = [];
   if (!Array.isArray(out.recents)) out.recents = [];

@@ -8,6 +8,7 @@ import { planView } from './views/plan.js';
 import { settingsView } from './views/settings.js';
 import { openSetup } from './modals/setup.js';
 import { autoBackupIfDue } from './drive.js';
+import { syncWeightFeed } from './feed.js';
 import { preloadBuiltinFoods } from './builtin.js';
 import { preloadPacks } from './packs.js';
 import { registerAppUpdates, applyUpdate } from './update.js';
@@ -92,6 +93,7 @@ function onVisible() {
     render();
   }
   autoBackupIfDue(); // fire-and-forget; never throws
+  syncWeightFeed(); // fire-and-forget; never rejects, at most every 30 min, no-op without a gist id
 }
 
 function registerServiceWorker() {
@@ -133,6 +135,7 @@ function start() {
   render();
   if (!state.onboarded) openSetup();
   autoBackupIfDue(); // fire-and-forget; never throws, no-op unless Drive backup is configured and connected
+  syncWeightFeed(); // fire-and-forget; never rejects, no-op unless a weight feed gist is set
 }
 
 start();

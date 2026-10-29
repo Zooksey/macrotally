@@ -1,7 +1,7 @@
 /* MacroTally service worker: precached app shell, network-first for same-origin GETs. */
 
 /** Bump to invalidate old caches. */
-const VERSION = 'v9';
+const VERSION = 'v10';
 const CACHE = `macrotally-${VERSION}`;
 
 /** App shell, relative to the service worker scope (works from a sub-path). */
@@ -65,6 +65,7 @@ const SHELL = [
   './js/ui.js',
   './js/app.js',
   './js/drive.js',
+  './js/feed.js',
   './js/views/diary.js',
   './js/views/weight.js',
   './js/views/plan.js',

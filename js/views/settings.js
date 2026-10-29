@@ -1,4 +1,5 @@
-// MacroTally — Settings view: profile, food sources, food packs, meals, install, Google Drive backup, backup, about.
+// MacroTally — Settings view: profile, food sources, food packs, meals, install, Google Drive backup, weight feed,
+// backup, about.
 import { state, save, todayStr, exportJSON, importJSON, resetAll } from '../store.js';
 import { refreshExpenditure } from '../calc.js';
 import { REGIONS } from '../foods.js';
@@ -7,6 +8,7 @@ import { nav } from '../app.js';
 import { openSetup } from '../modals/setup.js';
 import { listPacks, importPack, removePack, setPackEnabled, loadPacks, packsLoaded } from '../packs.js';
 import { driveConfigured, loadGIS, connectDrive, disconnectDrive, backupNow, fetchBackup, applyBackup } from '../drive.js';
+import { syncWeightFeed, parseGistId } from '../feed.js';
 
 import { APP_VERSION, checkForUpdate, updateAvailable } from '../update.js';
 
@@ -192,6 +194,31 @@ function driveCard() {
   return `<section class="card"><h2>Google Drive backup</h2>${body}</section>`;
 }
 
+/** "Weight feed" card: gist id of the Apple Health → Shortcut → gist feed, sync status and Sync now. */
+function feedCard() {
+  const f = state.feed;
+  let status = '';
+  if (f.gistId) {
+    if (f.lastError) status = `<p class="small warn">Sync failed: ${esc(f.lastError)}</p>`;
+    else if (f.lastSync) status = `<p class="muted small">Last sync ${esc(relativeTime(f.lastSync))} · ${esc(plural(f.lastCount || 0, 'weigh-in'))}</p>`;
+    else status = '<p class="muted small">Not synced yet</p>';
+  }
+  return `
+    <form class="card" data-submit="save-feed">
+      <h2>Weight feed</h2>
+      <p class="small">Brings in weigh-ins from a smart scale through Apple Health: an iPhone Shortcut copies them to a secret GitHub gist once a day, and MacroTally reads it when you open the app. Weigh-ins you type here are never overwritten.</p>
+      <label class="field"><span>Gist id</span>
+        <input name="gistId" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(f.gistId)}" placeholder="32 characters from the gist's address">
+      </label>
+      ${status}
+      <div class="btn-stack">
+        <button type="submit" class="btn btn-primary btn-block">Save weight feed</button>
+        ${f.gistId ? '<button type="button" class="btn btn-ghost btn-block" data-action="feed-sync">Sync now</button>' : ''}
+      </div>
+      <p class="hint">Leave the id empty to switch the feed off. See the README for the Shortcut that fills the gist from Apple Health.</p>
+    </form>`;
+}
+
 /**
  * Settings tab.
  * @returns {string} HTML
@@ -258,6 +285,8 @@ export function settingsView() {
     ${installCard()}
 
     ${driveCard()}
+
+    ${feedCard()}
 
     <section class="card">
       <h2>Backup</h2>
@@ -522,5 +551,36 @@ on('drive-disconnect', () => driveTask(async () => {
 on('drive-auto', (el) => {
   state.drive.autoBackup = !!el.checked;
   save();
+  requestRender();
+});
+
+// ---------- Weight feed ----------
+
+on('save-feed', async (form) => {
+  const raw = form.gistId.value.trim();
+  const id = parseGistId(raw);
+  if (raw && !id) {
+    toast("That doesn't look like a gist id or gist address", { kind: 'error' });
+    return;
+  }
+  const f = state.feed;
+  if (id !== f.gistId) {
+    // A new gist starts with a clean status; feed.imported stays so typed weigh-ins remain protected.
+    Object.assign(f, { gistId: id, lastSync: null, lastCount: 0, lastError: null });
+  }
+  save();
+  toast(id ? 'Weight feed saved' : 'Weight feed off');
+  requestRender();
+  if (!id) return;
+  await syncWeightFeed({ force: true });
+  requestRender();
+});
+
+on('feed-sync', async (el) => {
+  el.disabled = true;
+  const r = await syncWeightFeed({ force: true });
+  if (r && r.added + r.updated === 0) toast('No new weigh-ins');
+  else if (!r) toast(state.feed.lastError ? `Sync failed: ${state.feed.lastError}` : 'Could not sync right now (offline?)', { kind: 'error' });
+  // r with changes: syncWeightFeed already showed "N weigh-ins from the scale".
   requestRender();
 });

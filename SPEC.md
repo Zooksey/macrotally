@@ -25,6 +25,7 @@ js/calc.js           trend, expenditure, targets, totals     (LOGIC)
 js/foods.js          Open Food Facts / USDA lookup + scaling (LOGIC)
 js/scanner.js        camera barcode scanning                 (LOGIC)
 js/charts.js         inline-SVG line + bar charts            (LOGIC)
+js/feed.js           weight feed: Apple Health → Shortcut → GitHub gist → weights (LOGIC)
 js/ui.js             DOM helpers, action registry, modals    (UI)
 js/app.js            bootstrap, router, tab bar, render loop (UI)
 js/views/diary.js    (UI)
@@ -110,7 +111,12 @@ State shape:
   diary: { [date]: { entries: Entry[] } },
   recents: [foodId],                                // most recent first
   favorites: [foodId],
-  meals: ['Breakfast','Lunch','Dinner','Snacks']
+  meals: ['Breakfast','Lunch','Dinner','Snacks'],
+  feed: { gistId:'', lastSync:null|string, lastCount:0, lastError:null|string, imported:{ [date]: kg } }
+  // weight feed (deep-merged like profile/goal; backups carry it): gistId = secret gist id ('' = off);
+  // lastSync = ISO datetime of the last successful fetch; lastCount = weigh-ins added/updated by it;
+  // lastError = message of the last failed sync; imported = weigh-ins the feed wrote, so a later feed value may
+  // update them but never a typed one; pruned to the last 400 days (see js/feed.js)
 }
 ```
 
@@ -275,6 +281,35 @@ export function niceTicks(min, max, count = 4): number[]
 
 ---
 
+## js/feed.js (LOGIC)
+
+Weigh-ins from a smart scale without typing. Web apps cannot read HealthKit, so an iPhone Shortcut automation
+writes the last 30 days of Health weight samples into a secret GitHub gist once a day (one `yyyy-MM-dd HH:mm
+180.4 lb` line per sample; recipe in README) and the app pulls the gist when it opens. Reads are unauthenticated
+(api.github.com allows browser requests, 60/hour per IP).
+
+```js
+export function parseWeightLines(text, defaultUnit): { date, time: 'HH:MM'|null, kg }[]
+  // one sample per line: date YYYY-MM-DD | YYYY/MM/DD | M/D/YYYY, optional time (07:12, 7:12 AM, T07:12:00[±hh:mm]),
+  // a number with optional unit lb/lbs/pound(s)/kg/kilogram(s) (no unit → defaultUnit); separators space , tab ;
+  // lines without a valid date and a plausible weight (20–400 kg) are skipped; sorted by date then time (untimed last)
+export function dailyWeights(samples): { date, kg }[]   // earliest sample per day
+export function mergeFeedWeights(state, daily): { added, updated }
+  // mutates, does not save; dates ≤ today only. No weigh-in → add (unless the feed wrote that day and the user
+  // deleted it). Weigh-in the feed wrote and still unchanged → update when the new value differs by ≥ 0.05 kg.
+  // Any other weigh-in (typed, or retyped over a feed day) is left alone. Records feed.imported[date] = kg for
+  // every added/updated day; prunes imported to the last 400 days.
+export function gistText(json): string     // content of the first gist file, preferring *.txt/*.csv/*.json
+export function parseGistId(input): string // last /[0-9a-f]{20,40}/i run of an id or pasted gist URL, lowercased
+export async function syncWeightFeed({ force = false } = {}): Promise<{added, updated}|null>
+  // no-op when gistId blank or offline; unless force at most once per 30 min (lastSync and last attempt);
+  // never concurrent (a second call shares the running one); never rejects. GET api.github.com/gists/<id>
+  // (Accept application/vnd.github+json, cache 'no-store', 15 s timeout). Non-2xx → lastError "Gist not found
+  // (404)" / "GitHub rate limit, try later (403)" / "GitHub error (HTTP n)", network → "Could not reach GitHub",
+  // resolves null. Success → parse (profile units), dailyWeights, merge, lastSync/lastCount/lastError=null, save;
+  // when added+updated > 0 toast "N weigh-ins from the scale" + requestRender(). Does not call refreshExpenditure.
+```
+
 ## js/ui.js (UI)
 
 ```js
@@ -303,7 +338,7 @@ export function confirmDialog(message, { okLabel = 'OK', danger = false } = {}):
 
 - Imports store/calc/ui and all views/modals (importing a view module registers its actions).
 - `const current = { tab: 'diary', date: todayStr() }` exported as `nav`.
-- On start: `refreshExpenditure(state)` then `save()`; if `!state.onboarded` open the setup wizard (sticky); `bindGlobalEvents()`; register service worker `./sw.js` (ignore failures); listen for `beforeinstallprompt` and stash it on `window.__installPrompt`; render.
+- On start: `refreshExpenditure(state)` then `save()`; if `!state.onboarded` open the setup wizard (sticky); `bindGlobalEvents()`; register service worker `./sw.js` (ignore failures); listen for `beforeinstallprompt` and stash it on `window.__installPrompt`; render; then `syncWeightFeed()` fire-and-forget (also on every `visibilitychange` → visible; its 30-minute rule keeps that cheap).
 - `render()`: `#app` innerHTML = views[current.tab](); update `#tabbar` active state. Listen to `document` 'render' event → render(). Also re-render on `visibilitychange` → visible if date changed (new day).
 - Tab bar: 4 tabs Diary / Weight / Plan / Settings with inline SVG icons, `data-action="tab" data-tab="diary"`.
 - Hash routing optional; not required.
@@ -335,6 +370,7 @@ export function confirmDialog(message, { okLabel = 'OK', danger = false } = {}):
 - Food sources: USDA API key input + link to https://fdc.nal.usda.gov/api-key-signup (free), note that Open Food Facts is always on.
 - Meals: editable comma list (optional, keep simple).
 - Install: if `window.__installPrompt` show "Install app" button; else show iOS/Android add-to-home-screen instructions.
+- Weight feed (after Google Drive backup): form `data-submit="save-feed"` with a "Gist id" input (accepts a pasted gist URL, keeps the id via `parseGistId`; an unrecognisable value → error toast; blank switches the feed off and keeps `imported`; a changed id clears lastSync/lastCount/lastError). Save → toast "Weight feed saved" and `syncWeightFeed({ force: true })`. When an id is set: status line `Last sync 5 min ago · N weigh-ins`, `Sync failed: <lastError>` (class `warn`) or `Not synced yet`, and a ghost "Sync now" button (`data-action="feed-sync"`, forced sync, toast "No new weigh-ins" when nothing changed). Hint points to the README Shortcut recipe.
 - Backup: "Export backup" (Blob download `macrotally-backup-YYYY-MM-DD.json`), "Import backup" (file input, `data-change="import-file"`, confirm before replace), "Erase all data" (confirmDialog danger).
 - About: short text, privacy note (no server, data on this device only), version.
 
@@ -358,7 +394,7 @@ System font stack. Body padding-bottom for tab bar + `env(safe-area-inset-bottom
 
 - `manifest.webmanifest`: name "MacroTally", short_name "MacroTally", start_url "./", scope "./", display "standalone", background_color/theme_color matching dark bg, icons 192 & 512 PNG (purpose any) + icon.svg.
 - `index.html` (UI): meta viewport with `viewport-fit=cover`, theme-color, apple-mobile-web-app-capable, apple-mobile-web-app-status-bar-style black-translucent, apple-touch-icon → `./icons/icon-192.png`, link manifest, `<div id="app"></div><nav id="tabbar"></nav><div id="modal-root"></div><div id="toast-root"></div>`, `<script type="module" src="./js/app.js">`.
-- `sw.js`: `const VERSION = 'v1'`; precache the app shell (index.html, css, all js, manifest, icons) on install; on activate delete old caches + `clients.claim()`; fetch: same-origin GET → network-first falling back to cache (so updates arrive but offline still works); cross-origin → network only (do not cache API calls). Navigation requests fall back to cached `./index.html`.
+- `sw.js`: `const VERSION = 'v1'`; precache the app shell (index.html, css, all js, manifest, icons) on install; on activate delete old caches + `clients.claim()`; fetch: same-origin GET → network-first falling back to cache (so updates arrive but offline still works); cross-origin → network only (do not cache API calls, including the weight feed's api.github.com gist reads). Navigation requests fall back to cached `./index.html`. The SHELL list includes every module, `./js/feed.js` among them.
 - `tools/make_icons.py`: stdlib-only PNG writer producing 192 and 512 px icons: dark-green (#2e7d5b) rounded square with a white ring (like a macro ring) and a filled accent arc; also write `icons/icon.svg` equivalent. Run it once and commit the PNGs.
 
 ## Testing checklist (reviewer runs)
@@ -369,4 +405,5 @@ System font stack. Body padding-bottom for tab bar + `env(safe-area-inset-bottom
 - Weight: log several days → trend line; 7/30-day deltas.
 - Plan: presets fill rate; targets update; manual mode; Recalculate shows reason when insufficient data; with seeded data computes adaptive TDEE.
 - Export then Import round-trips; Erase resets.
+- Settings → Weight feed: a public gist id syncs ("Last sync just now · 0 weigh-ins"); a wrong id shows "Sync failed: Gist not found (404)"; `node tools/test_feed.mjs` passes.
 - Served from a sub-path with no absolute URLs; `sw.js` registers; no console errors.
