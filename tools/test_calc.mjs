@@ -589,6 +589,16 @@ test('tokenize', () => {
   assert.deepEqual(foods.tokenize(null), []);
   assert.deepEqual(foods.tokenize(undefined), []);
   assert.deepEqual(foods.tokenize(42), ['42']);
+  // Numbers keep a decimal point and a trailing %; & joins letters (a&w, m&ms); other punctuation separates.
+  assert.deepEqual(foods.tokenize('Milk, reduced fat, fluid, 2% milkfat'), ['milk', 'reduced', 'fat', 'fluid', '2%', 'milkfat']);
+  assert.deepEqual(foods.tokenize('Milk, whole, 3.25% milkfat'), ['milk', 'whole', '3.25%', 'milkfat']);
+  assert.deepEqual(foods.tokenize('Turkey, ground, 93% lean/ 7% fat, raw'), ['turkey', 'ground', '93%', 'lean', '7%', 'fat', 'raw']);
+  assert.deepEqual(foods.tokenize("M&M's"), ['m&m']);
+  assert.deepEqual(foods.tokenize('A&W Root Beer'), ['a&w', 'root', 'beer']);
+  assert.deepEqual(foods.tokenize('Mac & Cheese'), ['mac', 'cheese']);
+  assert.deepEqual(foods.tokenize('2%'), ['2%']);
+  assert.deepEqual(foods.tokenize('2'), ['2']);
+  assert.deepEqual(foods.tokenize('e.g. oz.'), ['e', 'g', 'oz']);
 });
 
 const mk = (id, name, extra = {}) => ({
@@ -677,6 +687,22 @@ test('searchLocal: tiny built-in list + library, ranked; odd input never throws'
   assert.deepEqual(foods.searchLocal('!!!', { library, builtin: list }), []);
   assert.deepEqual(foods.searchLocal('chicken', {}), []);
   assert.deepEqual(foods.searchLocal('chicken'), []);
+});
+
+test('search respects % in the query', () => {
+  const list = [
+    mk('usda:m2', 'Milk, reduced fat, fluid, 2% milkfat, with added vitamin A and vitamin D', { source: 'builtin' }),
+    mk('usda:m3', 'Milk, whole, 3.25% milkfat', { source: 'builtin' }),
+    mk('usda:cc', 'Cheese, cottage, lowfat, 2% milkfat', { source: 'builtin' }),
+    mk('usda:e2', 'Egg, whole, 2 large', { source: 'builtin' })
+  ];
+  const ids = (q) => foods.searchLocal(q, { builtin: list }).map((f) => f.id);
+  assert.deepEqual(ids('2%').sort(), ['usda:cc', 'usda:m2'], '"2%" matches only the two 2% foods, not "3.25%" or "2 large"');
+  // Head-word rule: the long USDA milk name beats the shorter cottage cheese because the query names "milk".
+  assert.equal(ids('2% milk')[0], 'usda:m2', '"2% milk" ranks the 2% milk first');
+  assert.equal(ids('whole milk')[0], 'usda:m3', '"whole milk" ranks the whole milk first');
+  const plain = ids('2');
+  assert.ok(plain.includes('usda:m2') && plain.includes('usda:e2'), `"2" prefix-matches 2% milk and the egg: ${plain}`);
 });
 
 test('effectiveUsdaKey: own key (trimmed) overrides the shared one', () => {

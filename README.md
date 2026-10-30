@@ -199,7 +199,7 @@ There is still no server: the gist lives in your own GitHub account and the app 
 
 ## AI add (a Claude helper on your own server)
 
-The **AI add** button at the top of the diary lets you describe what you ate ("71 g of Dot's pretzels"), take or choose a photo of the package or plate, or both. Claude identifies each food, reads the nutrition label from the photo or looks it up on the web, and works out how much you had. You confirm the result before anything is logged.
+The **AI add** button in the add-food sheet (tap **+** on a meal) lets you describe what you ate ("71 g of Dot's pretzels"), take or choose a photo of the package or plate, or both. Claude identifies each food, reads the nutrition label from the photo or looks it up on the web, and works out how much you had. You confirm the result before anything is logged.
 
 This is optional and off until you set it up. It needs:
 
@@ -211,7 +211,7 @@ Setting up the server (login token, Docker, Cloudflare Tunnel) is described in [
 1. **Settings** → **AI helper** → enter the helper's URL (e.g. `https://ai.example.com`) and the secret you put in the server's `AI_SECRET`.
 2. Tap **Save AI helper**, then **Test**. It should say "Connected · v1.6.1 · sonnet".
 
-Using it: tap **AI add**, pick the meal, type and/or add photos, tap **Ask Claude** and wait 20 to 40 seconds. You can attach up to 4 photos to one ask, for example the front of the pack (name, brand, flavour) plus the Nutrition Facts panel; Claude then reads the numbers straight off the panel. Each photo has its own remove button. You get one card per food with:
+Using it: tap **+** on a meal, then **AI add** (the meal is preselected; you can change it), type and/or add photos, tap **Ask Claude** and wait 20 to 40 seconds. You can attach up to 4 photos to one ask, for example the front of the pack (name, brand, flavour) plus the Nutrition Facts panel; Claude then reads the numbers straight off the panel. Each photo has its own remove button. You get one card per food with:
 
 - the name and brand, and where the numbers came from: **Label** (the manufacturer's label, from your photo or their site), **Web** (a third-party database) or **Estimate** (Claude's estimate);
 - a **duplicate check** against the foods you already have (your own foods, the built-in list and the restaurant packs). If the food is already there, the card says "Already in your foods" and logs that food, so no copy is created. If it looks like a stored food but the numbers differ, the card shows both sets of numbers side by side and lets you keep the stored food, update your own custom food with Claude's numbers, or add a corrected copy (built-in and pack foods are never changed). Otherwise it is marked **New food**;

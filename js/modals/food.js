@@ -189,7 +189,10 @@ export function openAddFood(meal, date) {
       <span class="search-icon">${icon('search')}</span>
       <input class="search-input" name="q" type="search" placeholder="Search foods" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" autofocus data-input="food-search" aria-label="Search foods">
     </form>
-    <button type="button" class="btn btn-primary btn-block btn-scan" data-action="open-scanner"${canScan ? '' : ' disabled'}>${icon('barcode')} Scan barcode</button>
+    <div class="add-actions">
+      <button type="button" class="btn btn-primary btn-scan" data-action="open-scanner"${canScan ? '' : ' disabled'}>${icon('barcode')} Scan barcode</button>
+      <button type="button" class="btn btn-ghost btn-ai" data-action="ai-add">${icon('sparkle')} AI add</button>
+    </div>
     ${canScan ? '' : '<p class="hint center">Camera scanning needs a secure (https) connection and a camera.</p>'}
     <div class="search-results" hidden></div>
     <div class="library">${libraryHtml()}</div>

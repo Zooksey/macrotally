@@ -1237,6 +1237,19 @@ input[type="checkbox"] {
   margin-top: 0;
 }
 
+.add-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.add-actions .btn {
+  flex: 1 1 0;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.add-actions .btn .icon { flex: none; }
+
 .searching {
   display: flex;
   align-items: center;
@@ -1397,48 +1410,6 @@ input[type="checkbox"] {
 /* ---------- Animations ---------- */
 
 /* ---------- AI add ---------- */
-
-/* Diary header: title and the "AI add" pill share a row that wraps on narrow screens. */
-.date-title-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 4px 8px;
-  max-width: 100%;
-  min-width: 0;
-}
-
-.date-title-row h1 {
-  min-width: 0;
-}
-
-.ai-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 30px;
-  padding: 4px 11px 4px 8px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-
-.ai-pill .icon {
-  width: 16px;
-  height: 16px;
-}
-
-.ai-pill:active {
-  transform: scale(0.97);
-}
 
 .ai-sheet textarea {
   resize: vertical;

@@ -86,7 +86,7 @@ over the API with a token that has **Account · Cloudflare Tunnel · Edit** and 
 ## 5. Connect the app
 
 In MacroTally: **Settings** → **AI helper** → URL `https://ai.<domain>`, the same secret as `AI_SECRET` →
-**Save** → **Test**. It should say "Connected · v1.6.1 · sonnet". The **AI add** button at the top of the diary
+**Save** → **Test**. It should say "Connected · v1.6.1 · sonnet". The **AI add** button in the add-food sheet (tap + on a meal)
 then works.
 
 If the app is hosted somewhere other than the default origins (your own GitHub Pages user, a custom domain), add

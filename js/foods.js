@@ -368,20 +368,20 @@ async function searchFoodsUncached(q, { key, region }) {
 /* Ranking                                                             */
 /* ------------------------------------------------------------------ */
 
+/** A token: letters/digits, optionally continued by ".<digits>" (3.25) or "&<letters/digits>" (a&w, m&ms), optionally ending in % (2%, 93%). */
+const TOKEN_RE = /[\p{L}\p{N}]+(?:\.\p{N}+|&[\p{L}\p{N}]+)*%?/gu;
+
 /**
- * Tokenize for matching: lowercase, drop apostrophes ("Bob's" → "bobs"), treat every other punctuation
- * character as a separator, split on whitespace, drop empty tokens. Never throws (null → []).
+ * Tokenize for matching: lowercase, drop apostrophes ("Bob's" → "bobs"), then take runs of letters/digits
+ * as tokens. A number keeps its decimal point and a trailing % ("3.25%", "2%"), and & joins letters as in
+ * "a&w" / "m&ms"; all other punctuation (and a lone "&" or "%") separates. Light plural stemming is applied
+ * to each token. Never throws (null → []).
  * @param {*} s
  * @returns {string[]}
  */
 export function tokenize(s) {
   if (s === null || s === undefined) return [];
-  return String(s).toLowerCase()
-    .replace(/['’`]/g, '')
-    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
-    .split(/\s+/)
-    .filter(Boolean)
-    .map(stem);
+  return (String(s).toLowerCase().replace(/['’`]/g, '').match(TOKEN_RE) || []).map(stem);
 }
 
 /** Light plural stemming so "bananas" and "banana" (or "eggs"/"egg", "oats"/"oat") compare equal. */
@@ -437,7 +437,7 @@ function foodTokens(food) {
  *   When no query token matches at all the food is not a match (0).
  * - Phrase: +4 when food.name lowercased contains the whole trimmed lowercased query; +3 more when the
  *   name starts with it.
- * - Position: +2 when the first name token starts with the first query token.
+ * - Head word: +1 when the first name token starts with the first query token, or equals any query token.
  * - Completeness: −3 when per100 cal, p, c and f are all 0; −1 when cal is 0 (an all-zero food gets both).
  * - Length: −0.05 per name token beyond 6, so long USDA descriptions rank below short names at equal match.
  * - Popularity: +0.8 × log10(1 + food.pop) (Open Food Facts scan count); +1.5 for built-in and
@@ -480,7 +480,8 @@ export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new
   if (joined.startsWith(phrase)) score += 5.5;
   else if (joined.includes(phrase)) score += 2;
   if (early && matched === q.length) score += 2;
-  if (name.length && name[0].startsWith(q[0])) score += 1;
+  // Head word: USDA names lead with the food ("Milk, …", "Cheese, …"), so a query naming it wins over one that merely contains it.
+  if (name.length && (name[0].startsWith(q[0]) || q.includes(name[0]))) score += 1;
   const n = food.per100 || {};
   const cal = Number(n.cal) || 0;
   if (!cal && !(Number(n.p) || 0) && !(Number(n.c) || 0) && !(Number(n.f) || 0)) score -= 3;

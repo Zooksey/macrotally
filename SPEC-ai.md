@@ -1,10 +1,10 @@
 # AI add: a Claude helper on your own server (v1.6.0)
 
-Status: final. Implements the "AI add" button on the diary. Written 2026-10-29.
+Status: final. Implements the "AI add" button (in the add-food sheet since v1.6.2, section 9). Written 2026-10-29.
 
 ## 1. What it does
 
-A button at the top of the diary opens a sheet where the user types a description, attaches a photo, or both
+A button in the add-food sheet opens a sheet where the user types a description, attaches a photo, or both
 ("71g of these" + a photo of a Dot's pretzels bag). The app sends it to a small HTTP service the user runs
 on their Unraid box behind an existing Cloudflare Tunnel. That service runs the Claude Code CLI headless
 (`claude -p`) on the user's Max subscription. Claude identifies the food(s), reads the label from the photo
@@ -222,15 +222,20 @@ What the result card shows per item (section 6.4):
 - `not comparable`: treat as a match with `same` unknown: show "Already in your foods" with "Use stored"
   selected and a "Use Claude's instead" link.
 
-### 6.4 Diary header (js/views/diary.js)
+### 6.4 Entry point: the add-food sheet (js/modals/food.js)
 
-Add a pill button `data-action="ai-add"` with a sparkle icon and the text "AI add" to the `date-nav` topbar,
-right of the title (keep the two arrows where they are; on narrow screens it may wrap under the title).
-Handler opens `openAiAdd({ date })`. Add a `sparkle` icon to js/ui.js.
+`openAddFood` shows an `.add-actions` row under the search box: "Scan barcode" (primary) and "AI add"
+(`btn-ghost`, sparkle icon, `data-action="ai-add"`) side by side. The `ai-add` handler lives in
+js/modals/ai.js (food.js does not import the AI modal; ai.js already imports `openCustomFood` from food.js, so
+the dependency stays one-way; js/app.js imports js/modals/ai.js for its side effects). It reads the add-food
+backdrop's `_ctx` (`{ meal, date }`) and calls `openAiAdd({ date, meal, replace: <add-food backdrop> })`;
+without a ctx it falls back to today with the default meal. Uses the `sparkle` icon in js/ui.js.
 
 ### 6.5 `js/modals/ai.js`, the sheet
 
-`openAiAdd({ date })`. One modal with three states, re-rendered in place:
+`openAiAdd({ date, meal, replace })`. A non-empty `meal` preselects that meal (kept even when it is not in the
+meal list); otherwise the default below applies. `replace` (the add-food sheet) is closed together with the AI
+sheet once items are logged; Cancel / close leaves it open. One modal with three states, re-rendered in place:
 
 1. **Compose**: meal `<select>` (the state's meals; default = the meal of the most recent entry on that date
    if it was added within the last 2 h, else by hour: before 10:30 the first meal, before 15:00 the second,
@@ -262,7 +267,7 @@ your own server; see the README for setup." Clearing both fields and saving turn
 
 ### 6.7 Misc
 
-- css/app.css: `.ai-pill`, `.ai-badge` (three colours), `.ai-item`, `.ai-match`, the mini diff table, the
+- css/app.css: `.add-actions`, `.ai-badge` (three colours), `.ai-item`, `.ai-match`, the mini diff table, the
   thumbnail; reuse the existing spinner if there is one.
 - sw.js: add `./js/ai.js` and `./js/modals/ai.js` to SHELL; VERSION `v11`. js/update.js APP_VERSION `1.6.0`.
 - README: new section "AI add (a Claude helper on your own server)" after the weight feed section: what it
@@ -314,7 +319,13 @@ App:
 Tests: `validateBody` with `images` (count limit, bad entry, both forms given, shorthand still accepted);
 `buildPrompt` with several photos; `askAi` body shape with two images.
 
-## 9. Out of scope
+## 9. Entry point moved to the add-food sheet (v1.6.2)
+
+The "AI add" pill on the diary header is gone; the button now sits next to "Scan barcode" in the add-food
+sheet (section 6.4), so the meal is the one whose + was tapped. Logging closes both sheets; cancelling the AI
+sheet returns to the add-food sheet. APP_VERSION 1.6.2, sw VERSION v13. No server change.
+
+## 10. Out of scope
 
 Queueing more than one job, Cloudflare Access, streaming progress, sending candidates to Claude, editing name
 and brand inline (use Edit details).

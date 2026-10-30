@@ -13,6 +13,7 @@ import { preloadBuiltinFoods } from './builtin.js';
 import { preloadPacks } from './packs.js';
 import { registerAppUpdates, applyUpdate } from './update.js';
 import './modals/food.js';
+import './modals/ai.js'; // registers the add-food sheet's "AI add" handler
 
 /**
  * Current navigation state (live object; views read it, handlers mutate it then requestRender()).

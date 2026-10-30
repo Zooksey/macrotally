@@ -238,7 +238,7 @@ function aiCard() {
   return `
     <form class="card" id="ai-helper" data-submit="save-ai">
       <h2>AI helper</h2>
-      <p class="small">Lets <strong>AI add</strong> on the diary ask Claude what you ate, from a description or a photo of the label.</p>
+      <p class="small">Lets <strong>AI add</strong> in the add-food sheet ask Claude what you ate, from a description or a photo of the label.</p>
       <label class="field"><span>Helper URL</span>
         <input name="aiUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(a.url)}" placeholder="https://ai.example.com">
       </label>

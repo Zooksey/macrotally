@@ -2,7 +2,7 @@
 // identifies it, the user confirms one card per item (matched against the foods the app already has, so no
 // duplicates), then everything is logged at once. One modal, three states re-rendered in place:
 // compose → waiting → result. See SPEC-ai.md section 6.
-import { state, saveFood, addEntry } from '../store.js';
+import { state, saveFood, addEntry, todayStr } from '../store.js';
 import { unitOptions, nutrientsFor, buildEntry } from '../foods.js';
 import { builtinFoods, loadBuiltinFoods } from '../builtin.js';
 import { packFoods, loadPacks } from '../packs.js';
@@ -58,14 +58,17 @@ function defaultMeal(date, meals) {
 
 /**
  * Open the AI add sheet for a diary date.
- * @param {{date: string}} opts
+ * @param {{date: string, meal?: string|null, replace?: HTMLElement|null}} opts
+ *   meal: preselected meal (a non-empty string wins over the default meal, even when it is not in the meal list);
+ *   replace: a sheet underneath (the add-food sheet) that is closed too once items are logged, not on cancel.
  * @returns {HTMLElement} backdrop
  */
-export function openAiAdd({ date }) {
+export function openAiAdd({ date, meal = null, replace = null }) {
   const meals = mealList();
   const ctx = {
     date,
-    meal: defaultMeal(date, meals),
+    meal: typeof meal === 'string' && meal ? meal : defaultMeal(date, meals),
+    replace,
     text: '',
     photos: [], // [{ base64, mime }] after downscaling (at most MAX_AI_PHOTOS); kept for Ask again, dropped on close
     phase: 'compose',
@@ -405,6 +408,14 @@ async function ask(ctx, text) {
   }
 }
 
+// "AI add" button in the add-food sheet: open over it with that sheet's meal and date preselected.
+on('ai-add', (el) => {
+  const bd = el && el.closest('.modal-backdrop');
+  const ctx = bd && bd._ctx;
+  if (ctx && ctx.date) openAiAdd({ date: ctx.date, meal: ctx.meal, replace: bd });
+  else openAiAdd({ date: todayStr(), meal: null });
+});
+
 on('ai-text', (el) => {
   const ctx = ctxOf(el);
   if (!ctx) return;
@@ -582,6 +593,7 @@ on('ai-commit', (el) => {
     addEntry(ctx.date, { ...buildEntry(food, Number(it.qty), unit), meal: ctx.meal });
   }
   closeModal(ctx.bd);
+  if (ctx.replace) closeModal(ctx.replace);
   toast(chosen.length === 1 ? 'Added 1 item' : `Added ${chosen.length} items`);
   requestRender();
 });
