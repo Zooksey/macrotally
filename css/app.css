@@ -804,6 +804,15 @@ input[type="checkbox"] {
   border-top: 0;
 }
 
+/* Settings groups: heading then tappable rows (spacing as in a diary meal card). */
+.card > h2 + .list {
+  margin-top: -4px;
+}
+
+.card > .list:last-child {
+  margin-bottom: -6px;
+}
+
 .row.static {
   cursor: default;
 }
@@ -1188,6 +1197,17 @@ input[type="checkbox"] {
 
 .sheet-head .icon-btn {
   margin-right: -10px;
+}
+
+/* Settings / Update goal sheets: the card's content, minus the card. */
+.setting-sheet .sheet-form > :first-child,
+.setting-sheet .sheet-head + p {
+  margin-top: 0;
+}
+
+.setting-sheet .sheet-form > :last-child,
+.setting-sheet > :last-child {
+  margin-bottom: 0;
 }
 
 .head-actions {

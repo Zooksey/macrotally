@@ -1,8 +1,8 @@
-// MacroTally — Plan view: expenditure, targets, goal settings, intake chart.
+// MacroTally — Plan view: expenditure, targets, goal summary (edited in the "Update goal" sheet), intake chart.
 import { state, save, todayStr, addDays, daysBetween, parseDate, toKg, fromKg, weightUnit, KG_PER_LB } from '../store.js';
 import { refreshExpenditure, estimateExpenditure, targets, projection, intakeSeries, latestTrend, snapshotTarget, bankStatus, bankStreakStart } from '../calc.js';
 import { lineChart, barChart } from '../charts.js';
-import { esc, fmt, parseNum, dateLabel, shortDate, on, toast, requestRender, confirmDialog } from '../ui.js';
+import { esc, fmt, parseNum, dateLabel, shortDate, icon, on, openModal, closeModal, toast, requestRender, confirmDialog } from '../ui.js';
 
 const RECALC_REASON = 'Needs ≥7 logged days and 2 weigh-ins ≥7 days apart in the last 3 weeks';
 const RATE_PRESETS = [0.25, 0.5, 0.75, 1];
@@ -97,7 +97,47 @@ function opt(value, label, selected) {
   return `<option value="${esc(value)}"${selected ? ' selected' : ''}>${esc(label)}</option>`;
 }
 
-function goalForm() {
+/** Read-only Goal card on the Plan page; "Update goal" opens the form in a sheet. */
+function goalCard() {
+  const g = state.goal || {};
+  const units = state.profile.units;
+  const u = weightUnit(units);
+  const imperial = units === 'imperial';
+  let headline;
+  if (g.mode === 'maintain') headline = 'Maintain weight';
+  else {
+    // One decimal: 0.45 kg stored from a "1 lb" entry reads as 1 lb, not 0.99 lb.
+    const rate = g.rateKgPerWeek != null ? round(fromKg(g.rateKgPerWeek, units), 1) : 0;
+    headline = `${g.mode === 'gain' ? 'Gain' : 'Lose'} ${rate} ${u} per week`;
+  }
+  if (g.targetWeightKg != null) headline += ` · target ${round(fromKg(g.targetWeightKg, units), 1)} ${u}`;
+  const protein = imperial ? round((g.proteinPerKg || 0) * KG_PER_LB, 2) : round(g.proteinPerKg || 0, 2);
+  const fatPct = round((g.fatPct || 0) * 100, 1);
+  let macros = 'Macros auto';
+  if (g.macroMode === 'manual') {
+    const m = g.manual || {};
+    macros = `Macros manual: ${fmt(m.cal)} kcal · P ${fmt(m.p)} · C ${fmt(m.c)} · F ${fmt(m.f)}`;
+  }
+  const detail = `Protein ${protein} g per ${imperial ? 'lb' : 'kg'} · Fat ${fatPct}% of calories · ${macros}`;
+  return `
+    <section class="card">
+      <h2>Goal</h2>
+      <p>${esc(headline)}</p>
+      <p class="muted small">${esc(detail)}</p>
+      <button type="button" class="btn btn-ghost btn-block" data-action="edit-goal">Update goal</button>
+    </section>`;
+}
+
+function sheetHead(title) {
+  return `
+    <div class="sheet-head">
+      <h2>${esc(title)}</h2>
+      <button type="button" class="icon-btn" data-action="close-modal" aria-label="Close">${icon('close')}</button>
+    </div>`;
+}
+
+/** Goal form (mode, target, rate, protein, fat, macro mode) for the "Update goal" sheet. */
+function goalFormBody() {
   const g = state.goal || {};
   const units = state.profile.units;
   const u = weightUnit(units);
@@ -110,8 +150,7 @@ function goalForm() {
   const manual = g.macroMode === 'manual';
   const maintain = g.mode === 'maintain';
   return `
-    <form class="card goal-form" data-submit="save-goal">
-      <h2>Goal</h2>
+    <form class="sheet-form goal-form" data-submit="save-goal">
       <div class="field-row">
         <label class="field"><span>Goal</span>
           <select name="mode" data-change="goal-mode">
@@ -227,7 +266,7 @@ function intakeCard() {
 }
 
 /**
- * Plan tab: expenditure estimate, current targets, calorie bank, goal form and intake chart.
+ * Plan tab: expenditure estimate, current targets, calorie bank, goal summary and intake chart.
  * @returns {string} HTML
  */
 export function planView() {
@@ -236,7 +275,7 @@ export function planView() {
     ${expenditureCard()}
     ${targetsCard()}
     ${bankCard()}
-    ${goalForm()}
+    ${goalCard()}
     ${intakeCard()}`;
 }
 
@@ -253,6 +292,10 @@ on('recalc', () => {
     toast(after === before ? `Expenditure unchanged at ${fmt(after)} kcal/day` : `Expenditure updated to ${fmt(after)} kcal/day`);
   }
   requestRender();
+});
+
+on('edit-goal', () => {
+  openModal(sheetHead('Update goal') + goalFormBody(), { cls: 'setting-sheet' });
 });
 
 on('goal-mode', (el) => {
@@ -336,6 +379,7 @@ on('save-goal', (form) => {
   if (!g.startDate || modeChanged) g.startDate = todayStr();
   snapshotTarget(state);
   save();
+  closeModal(form.closest('.modal-backdrop'));
   toast('Goal saved');
   requestRender();
 });

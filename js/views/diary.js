@@ -16,7 +16,7 @@ function updateBanner() {
 
 const OVERDUE_MS = 3 * 24 * 60 * 60 * 1000;
 
-/** Slim tappable Google Drive banner (handler 'drive-backup' lives in views/settings.js). */
+/** Slim tappable Google Drive banner (handler 'drive-backup' lives in modals/settings.js). */
 function driveBanner() {
   if (!driveConfigured() || !state.drive || !state.drive.connected) return '';
   const d = state.drive;

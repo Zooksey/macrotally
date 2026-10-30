@@ -3,7 +3,7 @@
    max-age=600) can never feed an old file into a new version. */
 
 /** Bump to invalidate old caches. */
-const VERSION = 'v15';
+const VERSION = 'v16';
 const CACHE = `macrotally-${VERSION}`;
 
 /** App shell, relative to the service worker scope (works from a sub-path). */
@@ -75,7 +75,8 @@ const SHELL = [
   './js/views/settings.js',
   './js/modals/food.js',
   './js/modals/setup.js',
-  './js/modals/ai.js'
+  './js/modals/ai.js',
+  './js/modals/settings.js'
 ];
 
 /** Absolute URLs (no query) of the shell, for the fetch handler. */

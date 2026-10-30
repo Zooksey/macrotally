@@ -12,6 +12,7 @@ import {
 } from '../ai.js';
 import { esc, fmt, fmtQty, parseNum, icon, on, openModal, closeModal, closeAllModals, toast, requestRender } from '../ui.js';
 import { openCustomFood } from './food.js';
+import { openSetting } from './settings.js';
 import { nav } from '../app.js';
 
 const TWO_HOURS = 2 * 60 * 60 * 1000;
@@ -470,10 +471,7 @@ on('ai-goto-settings', () => {
   closeAllModals();
   nav.tab = 'settings';
   requestRender();
-  setTimeout(() => {
-    const card = document.getElementById('ai-helper');
-    if (card) card.scrollIntoView({ block: 'start' });
-  }, 60);
+  openSetting('ai');
 });
 
 /* ------------------------------------------------------------------ */

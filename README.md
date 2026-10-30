@@ -174,7 +174,7 @@ There is still no server: the gist lives in your own GitHub account and the app 
    - Go to https://gist.github.com/ and create a **secret** gist with one file named `weights.txt`. Its content can be one line of anything (e.g. `start`). Click **Create secret gist**.
    - The gist's address looks like `https://gist.github.com/your-name/0123456789abcdef0123456789abcdef`. The long code at the end is the **gist id**.
    - Create a **classic** personal access token: your picture (top right) → **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)** → **Generate new token (classic)**. Give it a name (e.g. "MacroTally scale"), pick an expiration (**No expiration** saves you from redoing this), tick only the **`gist`** scope and click **Generate token**. Fine-grained tokens cannot edit gists, so it must be a classic one. Copy the token now; GitHub shows it only once.
-2. **MacroTally**: Settings → **Weight feed** → paste the gist id (pasting the whole gist address works too) → **Save weight feed**. It should say "Last sync just now · 0 weigh-ins".
+2. **MacroTally**: Settings → **Weight feed** → paste the gist id (pasting the whole gist address works too) → **Save weight feed**. The Weight feed row should then say "Last sync just now · 0 weigh-ins".
 3. **Shortcuts app** on the iPhone: tap **+** to make a new shortcut, name it "Scale to MacroTally", and add these actions, in order:
    1. **Find Health Samples** — Type: **Weight**; add a filter **Start Date** "is in the last" **30 days**; Sort by **Start Date**; Limit off.
    2. **Repeat with Each** (Health Samples), and inside the repeat:
@@ -185,14 +185,14 @@ There is still no server: the gist lives in your own GitHub account and the app 
       - Method: **PATCH**.
       - Headers: `Authorization` = `Bearer <token>` (the word Bearer, a space, then your token) and `Accept` = `application/vnd.github+json`.
       - Request Body: **JSON**, with key `files` → type **Dictionary** → inside it key `weights.txt` → type **Dictionary** → inside it key `content` → type Text, value: the **Combined Text** variable.
-4. Run the shortcut once by hand with the ▶ button. When asked, allow it to read **Weight** from Health. Open the gist in a browser: `weights.txt` should now hold one line per weigh-in. Then tap **Sync now** in MacroTally's Settings.
+4. Run the shortcut once by hand with the ▶ button. When asked, allow it to read **Weight** from Health. Open the gist in a browser: `weights.txt` should now hold one line per weigh-in. Then tap **Sync now** in MacroTally's Settings → **Weight feed**.
 5. Make it automatic: Shortcuts → **Automation** → **+** / **New Automation** → **Time of Day**, e.g. 09:00, **Daily** → **Run Immediately** (turn off any "Ask" / "Notify When Run" confirmation) → pick "Scale to MacroTally".
 
 ### Good to know
 
 - One weigh-in per day is kept: the earliest of the day, since morning weigh-ins are the standard.
 - A weigh-in you typed in the app is never overwritten (and one you delete stays deleted). If the scale later sends a different value for a day the feed filled in, that day is updated.
-- Today's weigh-in appears after the next run of the shortcut (09:00 in the example), the next time you open the app. **Sync now** in Settings fetches at once; otherwise the app checks at most every 30 minutes.
+- Today's weigh-in appears after the next run of the shortcut (09:00 in the example), the next time you open the app. **Sync now** in Settings → **Weight feed** fetches at once; otherwise the app checks at most every 30 minutes.
 - The shortcut sends the last 30 days every time, so days it missed (phone off, no signal) fill in on the next run.
 - Weights without a unit are read in the units chosen in your profile. Lines the app cannot read (no date or no weight) are skipped.
 - To stop, empty the Gist id field and save. You can also delete the gist and the token on GitHub.
@@ -209,7 +209,7 @@ This is optional and off until you set it up. It needs:
 Setting up the server (login token, Docker, Cloudflare Tunnel) is described in [server/README.md](server/README.md). Then, in the app:
 
 1. **Settings** → **AI helper** → enter the helper's URL (e.g. `https://ai.example.com`) and the secret you put in the server's `AI_SECRET`.
-2. Tap **Save AI helper**, then **Test**. It should say "Connected · v1.6.1 · sonnet".
+2. Tap **Save AI helper**, then open **AI helper** again and tap **Test**. It should say "Connected · v1.6.1 · sonnet".
 
 Using it: tap **+** on a meal, then **AI add**, type and/or add photos, tap **Ask Claude** and wait 20 to 40 seconds. You can attach up to 4 photos to one ask, for example the front of the pack (name, brand, flavour) plus the Nutrition Facts panel; Claude then reads the numbers straight off the panel. Each photo has its own remove button. You get one card per food with:
 
