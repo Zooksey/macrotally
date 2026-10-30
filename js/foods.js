@@ -394,6 +394,9 @@ const SYNONYMS = {
   turkey: ['turkey'], pb: ['peanut'], oj: ['orange'], rotisserie: ['chicken', 'roasted']
 };
 
+/** Stemmed synonyms of a query token (see SYNONYMS); [] when none. */
+export function synonymsOf(tok) { return SYNONYMS[tok] || []; }
+
 function stem(w) {
   if (w.length > 3 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
   if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') && !w.endsWith('us') && !w.endsWith('is')) return w.slice(0, -1);

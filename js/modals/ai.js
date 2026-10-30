@@ -245,9 +245,11 @@ function buildItems(items) {
     let choice = 'new';
     if (kind === 'same' || kind === 'unknown') choice = 'existing';
     else if (kind === 'diff') {
-      // Numbers read off the actual label beat what is stored; anything less certain keeps the stored food.
+      // Numbers read off the actual label beat what is stored; anything less certain keeps the stored food,
+      // unless the stored food is far off (not plausibly the same thing): then Claude's version is the default
+      // and "Use stored" is still one tap away, so a far-off food is never logged silently.
       if (ai.confidence === 'label') choice = canUpdate(it) ? 'update' : 'new';
-      else choice = 'existing';
+      else choice = match.cmp.far ? 'new' : 'existing';
     }
     setChoice(it, choice);
     out.push(it);

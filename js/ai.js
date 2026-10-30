@@ -5,7 +5,7 @@
  * See SPEC-ai.md.
  */
 import { state, save } from './store.js';
-import { makeCustomFood, unitOptions, rankFoods, tokenize } from './foods.js';
+import { makeCustomFood, unitOptions, rankFoods, tokenize, synonymsOf } from './foods.js';
 
 /** Client-side limit for one ask (the server stops Claude after 85 s; Cloudflare gives up at 100 s). */
 const ASK_TIMEOUT_MS = 95000;
@@ -289,13 +289,41 @@ function perServing(food) {
 }
 
 /**
+ * Two nutrient sets are far apart (not plausibly the same food even allowing for source noise) when kcal differ
+ * by more than 35 % of the larger value, or when any macro's share of the energy (4p, 4c, 9f over their sum,
+ * each side with a non-zero sum) differs by more than 0.20.
+ * @param {object} a nutrients {cal, p, c, f}
+ * @param {object} e nutrients {cal, p, c, f}
+ * @returns {boolean}
+ */
+function farApart(a, e) {
+  const ac = Number(a.cal) || 0;
+  const ec = Number(e.cal) || 0;
+  const big = Math.max(ac, ec);
+  if (big > 0 && Math.abs(ac - ec) > 0.35 * big) return true;
+  const shares = (n) => {
+    const p = 4 * (Number(n.p) || 0);
+    const c = 4 * (Number(n.c) || 0);
+    const f = 9 * (Number(n.f) || 0);
+    const t = p + c + f;
+    return t > 0 ? [p / t, c / t, f / t] : null;
+  };
+  const as = shares(a);
+  const es = shares(e);
+  if (!as || !es) return false;
+  return as.some((v, i) => Math.abs(v - es[i]) > 0.20);
+}
+
+/**
  * Compare Claude's food with a stored one: per 100 g when neither is servingOnly, else per (first) serving; when
  * only one side is servingOnly and the other has no serving, they are not comparable.
  * same = kcal within 10 % and each of p, c, f within max(2 g, 15 %). diffs lists the values outside that band
  * (fiber is listed too but never breaks `same`). Tolerances are relative to the stored value.
+ * far = not plausibly the same food (farApart on the same basis: kcal more than 35 % apart, or a macro energy
+ * share more than 0.20 apart); computed independently of `same`.
  * @param {object} aiFood
  * @param {object} existing
- * @returns {{comparable: boolean, same?: boolean, basis?: '100g'|'serving', diffs?: {key: string, ai: number, existing: number}[]}}
+ * @returns {{comparable: boolean, same?: boolean, far?: boolean, basis?: '100g'|'serving', diffs?: {key: string, ai: number, existing: number}[]}}
  */
 export function compareNutrients(aiFood, existing) {
   if (!aiFood || !existing) return { comparable: false };
@@ -323,15 +351,19 @@ export function compareNutrients(aiFood, existing) {
       if (key !== 'fiber') same = false;
     }
   }
-  return { comparable: true, same, basis, diffs };
+  return { comparable: true, same, far: farApart(a, e), basis, diffs };
 }
 
 /**
  * Look for a food the app already has that is the same as Claude's item (no second AI call): ranks the pool for
- * "brand name" (rankFoods, top 5), then keeps candidates whose name and brand tokens cover at least 60 % of the
+ * "brand name" (rankFoods, top 12), then keeps candidates whose name and brand tokens cover at least 60 % of the
  * item's name tokens (brand words are taken out of the item's name first, so "Dot's Pretzels Original" by
- * "Dot's Pretzels" counts as "original"), and, when both have a brand, whose brand shares a token. Library foods
- * win, then the better rank.
+ * "Dot's Pretzels" counts as "original"), and, when both have a brand, whose brand shares a token.
+ * Each survivor's head words (its name before the first comma, minus its brand) that the item does not account
+ * for (own words, their synonyms, the item's brand) are `extra`; with the nutrients this gives a tier: 0 no extra
+ * and same (or not comparable), 1 no extra but numbers differ, 2 extra but same numbers ("Nuts, almonds"), 3 extra,
+ * a library food, numbers close but not same; anything else ("Grape leaves" for "grapes") is rejected.
+ * The best tier wins, then library foods, then the better rank.
  * @param {object} item Claude's item
  * @param {object} food foodFromAiItem(item)
  * @param {object[]} pool library + built-in + enabled pack foods
@@ -349,7 +381,8 @@ export function findExisting(item, food, pool, { localIds } = {}) {
   const nameTok = allName.filter((t) => !brandTok.has(t));
   const want = nameTok.length ? nameTok : allName;
   if (!want.length) return null;
-  const ranked = rankFoods(query, (pool || []).filter((f) => f && f.id && f.id !== (food && food.id)), { limit: 5, localIds: ids });
+  const ranked = rankFoods(query, (pool || []).filter((f) => f && f.id && f.id !== (food && food.id)), { limit: 12, localIds: ids });
+  const accounted = (h) => want.includes(h) || want.some((w) => synonymsOf(w).includes(h)) || brandTok.has(h);
   const matches = [];
   ranked.forEach((cand, rank) => {
     const candName = tokenize(cand.name);
@@ -361,10 +394,22 @@ export function findExisting(item, food, pool, { localIds } = {}) {
     // A generic food ("banana", no brand) must not become a branded one ("Banana · Five Guys"), unless the
     // user saved that branded food themselves.
     if (!brandTok.size && candBrand.length && !ids.has(cand.id)) return;
-    matches.push({ cand, rank, lib: ids.has(cand.id) ? 1 : 0 });
+    const lib = ids.has(cand.id) ? 1 : 0;
+    // Head words: USDA style "Grapes, red or green (...), raw" → "grapes"; no comma → the whole name.
+    const candText = String(cand.name || '');
+    const comma = candText.indexOf(',');
+    const brandSet = new Set(candBrand);
+    const head = tokenize(comma >= 0 ? candText.slice(0, comma) : candText).filter((t) => !brandSet.has(t));
+    const extra = head.filter((h) => !accounted(h));
+    const cmp = compareNutrients(food, cand);
+    let tier;
+    if (!extra.length) tier = (!cmp.comparable || cmp.same) ? 0 : 1;
+    else if (cmp.comparable && cmp.same) tier = 2;
+    else if (lib && cmp.comparable && !cmp.far) tier = 3;
+    else return; // "Grape leaves" for "grapes", "Almond butter" for "almonds", "Banana bread" for "banana"
+    matches.push({ cand, cmp, rank, lib, tier });
   });
   if (!matches.length) return null;
-  matches.sort((x, y) => y.lib - x.lib || x.rank - y.rank);
-  const best = matches[0].cand;
-  return { food: best, cmp: compareNutrients(food, best) };
+  matches.sort((x, y) => x.tier - y.tier || y.lib - x.lib || x.rank - y.rank);
+  return { food: matches[0].cand, cmp: matches[0].cmp };
 }

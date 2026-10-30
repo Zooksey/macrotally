@@ -196,17 +196,31 @@ search pool the Add-food search uses (library, built-in list, enabled packs; rec
 as part of the library).
 
 `findExisting(item, food, pool)`:
-1. Query = `brand + ' ' + name` from the item. Run `rankFoods(query, pool, { limit: 5, localIds })` (js/foods.js).
-2. A candidate counts as a match when its name tokens cover at least 60% of the item's name tokens (use
-   `tokenize`), and, when both have a brand, the brand tokens overlap at least one token. Foods from the user's
-   library win ties, then the higher rank score.
-3. Returns `{ food: candidate, cmp: compareNutrients(food, candidate) } | null`.
+1. Query = `brand + ' ' + name` from the item. Run `rankFoods(query, pool, { limit: 12, localIds })` (js/foods.js).
+2. A candidate survives when its name and brand tokens cover at least 60% of the item's name tokens (use
+   `tokenize`; the item's brand words are taken out of its name first), and, when both have a brand, the brand
+   tokens overlap at least one token (a brandless item never takes a branded built-in or pack food). For each
+   survivor, its *head tokens* are the tokens of its name before the first comma (the whole name when there is
+   no comma; "Grapes, red or green (...), raw" → "grapes"), minus its own brand tokens. A head token is
+   accounted for when it is one of the item's name tokens, a synonym of one (`synonymsOf` in js/foods.js), or
+   one of the item's brand tokens; the rest are `extra`. With `cmp = compareNutrients(food, candidate)`:
+   - tier 0: no `extra`, and not comparable or `same`;
+   - tier 1: no `extra`, comparable but not `same` (same thing, numbers differ: raw vs roasted chicken);
+   - tier 2: `extra`, but comparable and `same` ("Nuts, almonds" for "almonds");
+   - tier 3: `extra`, a library food, comparable, not `same` and not `far` (a saved food with descriptor words);
+   - otherwise rejected ("Grape leaves" for "grapes", "Almond butter" for "almonds", "Banana bread" for
+     "banana").
+   Survivors sort by tier, then library foods first, then rank.
+3. Returns `{ food: best, cmp } | null`, with the `cmp` computed for the best candidate.
 
 `compareNutrients(aiFood, existing)`: compare per 100 g when neither is servingOnly, else per serving (the
 first serving of each; if only one side is servingOnly, compare per serving when the other side has a serving,
-otherwise return `{ comparable: false }`). Result `{ comparable, same, diffs }` where `same` is true when kcal
-is within 10% and each of p, c, f is within max(2 g, 15%). `diffs` lists `{ key, ai, existing }` for the
-values outside that band (fiber is reported but never breaks `same`).
+otherwise return `{ comparable: false }`). Result `{ comparable, same, far, basis, diffs }` where `same` is true
+when kcal is within 10% and each of p, c, f is within max(2 g, 15%). `diffs` lists `{ key, ai, existing }` for
+the values outside that band (fiber is reported but never breaks `same`). `far` (computed independently, on the
+same basis) means not plausibly the same food even allowing for source noise: kcal differ by more than 35% of
+the larger value, or any macro's share of the energy (4p, 4c, 9f over their sum, when both sums are > 0)
+differs by more than 0.20.
 
 What the result card shows per item (section 6.4):
 - No match: "New food" tag; Add creates the custom food.
@@ -217,8 +231,8 @@ What the result card shows per item (section 6.4):
   existing food is a custom food, "Update stored" (overwrite the existing food's per100 and serving with
   Claude's via the store's custom-food save, keeping the id, then use it; toast "Updated <name>"). For a
   built-in or pack food (read-only data files) the second choice is "Add corrected copy", which creates the
-  custom food as usual. Default selection: "Update stored" / "Add corrected copy" when Claude's confidence is
-  `label` (numbers read off the actual label beat what is stored); otherwise "Use stored".
+  custom food as usual. Default selection: "Update stored" / "Add corrected copy" when confidence is `label`;
+  otherwise "Use stored" unless the stored food is `far` off, in which case Claude's version is the default.
 - `not comparable`: treat as a match with `same` unknown: show "Already in your foods" with "Use stored"
   selected and a "Use Claude's instead" link.
 
@@ -282,8 +296,10 @@ your own server; see the README for setup." Clearing both fields and saving turn
 - `tools/test_ai.mjs` (node, like test_feed.mjs): `foodFromAiItem` for the three `per` cases (per100 scaling,
   servingOnly flag, serving label); `amountFromAiItem` for grams, servings, neither, and per-100g with no
   serving; `normalizeUrl` accept and reject; `confidenceLabel`; `findExisting` (library match beats pack match,
-  brand mismatch rejected, 60% token rule); `compareNutrients` (same within band, kcal 12% off flagged,
-  servingOnly vs weighed not comparable).
+  brand mismatch rejected, 60% token rule, head words must be the item's (grapes not grape leaves), numbers
+  pick the variant (grilled chicken → roasted; raw only → far), same numbers forgive a category head word
+  ("Nuts, almonds"), library food with descriptor words (tier 3; not the user's → null; "Banana bread" → null));
+  `compareNutrients` (same within band, kcal 12% off flagged, servingOnly vs weighed not comparable, `far`).
 - `tools/test_ai_server.mjs`: `corsHeaders` allow and deny; `validateBody` (missing both, too long text, bad
   mime, oversize base64); `parseClaudeOutput` (good, missing structured_output, bad numbers filtered, more
   than 8 items cut); `buildArgs` contains the lockdown flags and never `--bare`.
@@ -330,3 +346,11 @@ sheet returns to the add-food sheet. APP_VERSION 1.6.2, sw VERSION v13. No serve
 
 Queueing more than one job, Cloudflare Access, streaming progress, sending candidates to Claude, editing name
 and brand inline (use Edit details).
+
+## 11. Smarter matching (v1.6.6)
+
+"Grapes" matched "Grape leaves, canned": the top-ranked candidates tied on score and the matcher never looked
+at the nutrients. Now a candidate's head words (name before the first comma, minus its brand) must be the
+item's own words, synonyms or brand, unless the numbers agree (`same`) or it is a close library food; among
+the survivors the nutrients pick the variant (tiers, section 6.3). `compareNutrients` reports `far`, and a
+non-label match that is far off defaults to Claude's version. APP_VERSION 1.6.6, sw VERSION v17.
