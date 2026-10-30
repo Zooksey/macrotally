@@ -237,8 +237,9 @@ without a ctx it falls back to today with the default meal. Uses the `sparkle` i
 meal list); otherwise the default below applies. `replace` (the add-food sheet) is closed together with the AI
 sheet once items are logged; Cancel / close leaves it open. One modal with three states, re-rendered in place:
 
-1. **Compose**: meal `<select>` (the state's meals; default = the meal of the most recent entry on that date
-   if it was added within the last 2 h, else by hour: before 10:30 the first meal, before 15:00 the second,
+1. **Compose**: titled "AI add to <meal>" (the meal comes from the add-food sheet; there is no meal picker in
+   the AI sheet since v1.6.3. The fallback when opened without one: the meal of the most recent entry on that
+   date if it was added within the last 2 h, else by hour: before 10:30 the first meal, before 15:00 the second,
    before 20:00 the third, else the fourth); `<textarea>` with placeholder "What did you eat? e.g. 71 g of
    Dot's pretzels"; photo row with "Take photo" (`<input type="file" accept="image/*" capture="environment">`)
    and "Choose photo" (no capture), a thumbnail with a remove button once chosen; primary button "Ask Claude"

@@ -127,17 +127,6 @@ function head(title) {
     </div>`;
 }
 
-function mealSelect(ctx) {
-  const meals = mealList();
-  if (!meals.includes(ctx.meal)) meals.push(ctx.meal);
-  return `
-    <label class="field"><span>Meal</span>
-      <select name="meal" data-change="ai-meal">
-        ${meals.map((m) => `<option value="${esc(m)}"${m === ctx.meal ? ' selected' : ''}>${esc(m)}</option>`).join('')}
-      </select>
-    </label>`;
-}
-
 /* ------------------------------------------------------------------ */
 /* Compose                                                             */
 /* ------------------------------------------------------------------ */
@@ -167,9 +156,8 @@ function composeHtml(ctx) {
           <input class="visually-hidden" type="file" accept="image/*" multiple data-change="ai-photo">
         </label>`
     : `<p class="muted small">${MAX_AI_PHOTOS} photos is the most per ask.</p>`;
-  return `${head('AI add')}
+  return `${head(`AI add to ${ctx.meal}`)}
     <form class="ai-compose" data-submit="ai-ask">
-      ${mealSelect(ctx)}
       <label class="field"><span>Description</span>
         <textarea name="text" rows="3" maxlength="${MAX_AI_TEXT}" autocomplete="off" placeholder="What did you eat? e.g. 71 g of Dot's pretzels" data-input="ai-text">${esc(ctx.text)}</textarea>
       </label>
@@ -352,7 +340,6 @@ function resultHtml(ctx) {
   const n = ctx.items.length;
   return `${head(n === 1 ? 'Claude found 1 item' : `Claude found ${n} items`)}
     ${Number(ctx.seconds) > 0 ? `<p class="muted small ai-took">Answered in ${fmt(ctx.seconds)} s</p>` : ''}
-    ${mealSelect(ctx)}
     <div class="ai-list">${ctx.items.map(itemHtml).join('')}</div>
     <div class="ai-again">
       <label class="field"><span>Not right? Tell Claude</span>
@@ -422,13 +409,6 @@ on('ai-text', (el) => {
   ctx.text = el.value;
   const btn = ctx.bd.querySelector('.ai-ask-btn');
   if (btn) btn.disabled = !(ctx.text.trim() || ctx.photos.length);
-});
-
-on('ai-meal', (el) => {
-  const ctx = ctxOf(el);
-  if (!ctx) return;
-  ctx.meal = el.value;
-  refreshAddButton(ctx);
 });
 
 on('ai-photo', async (el) => {
