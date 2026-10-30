@@ -2,8 +2,9 @@
 import { state, uid, saveFood, deleteFood, addEntry, updateEntry, removeEntry, toggleFavorite } from '../store.js';
 import {
   searchFoods, lookupBarcode, effectiveUsdaKey, searchLocal, rankFoods,
-  nutrientsFor, unitOptions, buildEntry, makeCustomFood
+  nutrientsFor, unitOptions, buildEntry, makeCustomFood, nutritionLooksOff
 } from '../foods.js';
+import { aiConfigured, askAi, downscaleImage } from '../ai.js';
 import { builtinFoods, loadBuiltinFoods } from '../builtin.js';
 import { packFoods, loadPacks } from '../packs.js';
 import { startScanner, scannerSupported } from '../scanner.js';
@@ -66,6 +67,7 @@ function kcalText(food) {
 
 /** Small source badge for library rows. */
 function sourceBadge(food) {
+  if (food.origin) return '<span class="badge">Edited</span>';
   if (food.source === 'custom') return '<span class="badge">Custom</span>';
   if (food.source === 'usda' || food.source === 'builtin') return '<span class="badge">USDA</span>';
   if (food.source === 'pack') return `<span class="badge">${esc(food.brand || 'Menu')}</span>`;
@@ -403,11 +405,13 @@ export function openFoodDetail(food, { meal, date, entry = null }) {
   const per = food.per100 || {};
   const grams = qty * units[unitIdx].grams;
   const editing = !!entry;
+  const off = food._snapshot ? null : nutritionLooksOff(food);
+  const subline = [food.brand ? esc(food.brand) : '', food.origin ? 'Edited by you' : ''].filter(Boolean).join(' · ');
   const html = `
     <div class="sheet-head">
       <div class="sheet-title">
         <h2>${esc(food.name || 'Food')}</h2>
-        ${food.brand ? `<div class="muted small">${esc(food.brand)}</div>` : ''}
+        ${subline ? `<div class="muted small">${subline}</div>` : ''}
       </div>
       <div class="head-actions">
         ${food._snapshot ? '' : favButton(food)}
@@ -432,7 +436,8 @@ export function openFoodDetail(food, { meal, date, entry = null }) {
         </select>
       </label>
       <p class="muted small per100">Per ${esc(servingOnlyLabel(food) || '100 g')}: ${fmt(per.cal)} kcal · P ${fmt(per.p, 1)} · C ${fmt(per.c, 1)} · F ${fmt(per.f, 1)}${per.fiber ? ` · Fiber ${fmt(per.fiber, 1)}` : ''}</p>
-      ${food.source === 'custom' && !food._snapshot ? `<button type="button" class="link-btn" data-action="detail-edit-food">${icon('edit', 'icon-sm')} Edit food</button>` : ''}
+      ${off ? `<p class="small warn detail-warn">${icon('alert', 'icon-sm')} These numbers look off: ${esc(off)}.</p>` : ''}
+      ${!food._snapshot ? `<button type="button" class="link-btn" data-action="detail-edit-food">${icon('edit', 'icon-sm')} Edit food</button>` : ''}
       ${food.barcode ? `<p class="muted small">Barcode ${esc(food.barcode)}</p>` : ''}
       <div class="btn-row">
         ${editing ? '<button type="button" class="btn btn-danger" data-action="detail-delete">Delete</button>' : ''}
@@ -572,6 +577,7 @@ export function openCustomFood({ barcode = null, food = null, meal, date, entry 
         <label class="field"><span>Brand</span><input name="brand" type="text" autocomplete="off" value="${esc(food ? food.brand : '')}" placeholder="optional"></label>
         <label class="field"><span>Barcode</span><input name="barcode" type="text" inputmode="numeric" autocomplete="off" value="${esc((food && food.barcode) || barcode || '')}" placeholder="optional"></label>
       </div>
+      ${aiConfigured(state) ? `<div class="label-read">${labelReadHtml()}</div>` : ''}
       <div class="field-row">
         <label class="field"><span>Serving label</span><input name="servingLabel" type="text" autocomplete="off" value="${esc(servingLabel)}"></label>
         <label class="field"><span>Serving size (g)</span><input name="servingGrams" type="text" inputmode="decimal" autocomplete="off" value="${esc(s && !servingOnly ? num1(s.grams) : '')}" placeholder="optional"></label>
@@ -597,12 +603,103 @@ export function openCustomFood({ barcode = null, food = null, meal, date, entry 
         <button type="submit" class="btn btn-primary grow">Save food</button>
       </div>
     </form>`;
-  const bd = openModal(html, { cls: 'custom-food' });
-  bd._ctx = { food, meal, date, entry, replace, onSaved };
+  const bd = openModal(html, {
+    cls: 'custom-food',
+    onClose: () => {
+      const c = bd._ctx;
+      if (!c) return;
+      c.closed = true;
+      if (c.labelJob) c.labelJob.ctrl.abort();
+    }
+  });
+  bd._ctx = { food, meal, date, entry, replace, onSaved, labelJob: null, closed: false };
   return bd;
 }
 
-on('custom-save', (form) => {
+/** The editor's "Read the nutrition label" box: the file button with its hint, or (after a read) the result line and the button. */
+function labelReadHtml(result = '') {
+  return `
+    ${result}
+    <label class="btn btn-ghost btn-block file-btn">${icon('camera')} Read the nutrition label
+      <input class="visually-hidden" type="file" accept="image/*" capture="environment" data-change="label-photo">
+    </label>
+    ${result ? '' : '<p class="hint">Photograph the Nutrition Facts panel; Claude fills in the numbers for you to check.</p>'}`;
+}
+
+on('label-photo', async (el) => {
+  const file = el.files && el.files[0];
+  el.value = '';
+  if (!file) return;
+  const ctx = ctxOf(el);
+  const form = el.closest('form');
+  const box = el.closest('.label-read');
+  if (!ctx || !form || !box || ctx.labelJob) return;
+  const submit = form.querySelector('button[type="submit"]');
+  const ctrl = new AbortController();
+  const started = Date.now();
+  box.innerHTML = `<p class="small label-status" role="status"><span class="spinner" aria-hidden="true"></span> Reading the label… <span class="muted">0 s</span></p><button type="button" class="btn btn-ghost btn-block" data-action="label-cancel">Cancel</button>`;
+  const secs = box.querySelector('.label-status .muted');
+  const timer = setInterval(() => {
+    if (secs) secs.textContent = `${Math.round((Date.now() - started) / 1000)} s`;
+  }, 1000);
+  ctx.labelJob = { ctrl, timer };
+  if (submit) submit.disabled = true;
+  const finish = (result = '') => {
+    clearInterval(timer);
+    if (ctx.labelJob && ctx.labelJob.ctrl === ctrl) ctx.labelJob = null;
+    if (ctx.closed) return;
+    if (submit) submit.disabled = false;
+    box.innerHTML = labelReadHtml(result);
+  };
+  try {
+    const photo = await downscaleImage(file);
+    if (ctrl.signal.aborted) {
+      const err = new Error('Cancelled');
+      err.cancelled = true;
+      throw err;
+    }
+    const name = form.foodName.value.trim();
+    const brand = form.brand.value.trim();
+    const text = `Nutrition label photo${name ? ` for ${name}` : ''}${brand ? ` by ${brand}` : ''}. Read the Nutrition Facts panel and report its values per labelled serving (or per 100 g if that is how the panel is printed). One item.`;
+    const data = await askAi({ text, images: [photo], signal: ctrl.signal });
+    const item = data && data.items && data.items[0];
+    if (ctx.closed) {
+      finish();
+      return;
+    }
+    if (!item) {
+      finish();
+      toast("Claude couldn't find a label in that photo", { kind: 'error' });
+      return;
+    }
+    // Name and brand are filled only when empty; the barcode field is left alone (Claude doesn't read it).
+    if (!form.foodName.value.trim() && item.name) form.foodName.value = String(item.name).trim();
+    if (!form.brand.value.trim() && item.brand) form.brand.value = String(item.brand).trim();
+    if (item.servingLabel && String(item.servingLabel).trim()) form.servingLabel.value = String(item.servingLabel).trim();
+    const sg = Number(item.servingGrams);
+    // per 'serving' without grams leaves the size blank: the food is saved as servingOnly.
+    form.servingGrams.value = sg > 0 ? num1(sg) : '';
+    const radio = form.querySelector(`input[name="per"][value="${item.per === '100g' ? '100g' : 'serving'}"]`);
+    if (radio) radio.checked = true;
+    for (const k of ['cal', 'p', 'c', 'f', 'fiber']) {
+      const v = Number(item[k]);
+      form[k].value = Number.isFinite(v) && v >= 0 ? num1(v) : '';
+    }
+    finish(`<p class="small">${icon('sparkle', 'icon-sm')} Filled from the label photo${item.confidence === 'label' ? '' : ' (no clear panel found, numbers are an estimate)'}. Check them, then save.</p>`);
+    toast('Label read');
+  } catch (err) {
+    finish();
+    if (ctx.closed || (err && err.cancelled) || ctrl.signal.aborted) return;
+    toast((err && err.message) || "Couldn't read the label", { kind: 'error' });
+  }
+});
+
+on('label-cancel', (el) => {
+  const ctx = ctxOf(el);
+  if (ctx && ctx.labelJob) ctx.labelJob.ctrl.abort();
+});
+
+on('custom-save', async (form) => {
   const ctx = ctxOf(form);
   if (!ctx) return;
   const name = form.foodName.value.trim();
@@ -641,14 +738,31 @@ on('custom-save', (form) => {
     p: optNum(form.p),
     c: optNum(form.c),
     f: optNum(form.f),
-    fiber: optNum(form.fiber)
+    fiber: optNum(form.fiber),
+    // An edited scanned/built-in/pack food keeps its id and barcode and remembers where it came from.
+    origin: ctx.food ? (ctx.food.origin || (ctx.food.source !== 'custom' ? ctx.food.source : null)) : null
   });
   const existed = !!(ctx.food && state.foods[ctx.food.id]);
   saveFood(food);
+  foodCache.set(food.id, food);
   closeModal(backdropOf(form));
   if (ctx.replace) closeModal(ctx.replace);
   toast(existed ? 'Food updated' : 'Food saved');
   if (typeof ctx.onSaved === 'function') ctx.onSaved(food);
+  if (ctx.food) {
+    // Other entries of this food on the same day still carry the old numbers: offer to update them.
+    const others = (state.diary[ctx.date]?.entries || []).filter((e) => e.foodId === food.id && (!ctx.entry || e.id !== ctx.entry.id));
+    if (others.length) {
+      const ok = await confirmDialog(`Update ${others.length === 1 ? 'the other entry' : `${others.length} other entries`} of ${food.name} logged this day with the new numbers?`, { okLabel: 'Update entries' });
+      if (ok) {
+        for (const e of others) {
+          const unit = unitOptions(food).find((u) => u.label === e.unit?.label) || e.unit;
+          updateEntry(ctx.date, e.id, { servingOnly: undefined, ...buildEntry(food, e.qty, unit) });
+        }
+        requestRender();
+      }
+    }
+  }
   openFoodDetail(food, { meal: ctx.meal, date: ctx.date, entry: ctx.entry });
 });
 

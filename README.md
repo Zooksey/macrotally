@@ -3,6 +3,7 @@
 A free, account-less macro tracker you host yourself and run on your phone. It replaces the parts of MacroFactor that matter most:
 
 - **Barcode scanning** with the phone camera, looked up in the free Open Food Facts database (optionally USDA FoodData Central too).
+- **Fix a scanned food**: **Edit food** works on any food, not just your own. The corrected copy keeps the barcode, so the next scan finds your numbers, and with the AI helper set up you can photograph the Nutrition Facts panel to fill them in. Foods whose numbers don't add up (calories far from the macros, more than 100 g of macros per 100 g) get a "these numbers look off" warning.
 - **Portion scaling by weight**: log in grams, ounces or servings and watch the macros scale live.
 - **Macro tracking** per meal against daily calorie, protein, carb and fat targets.
 - **Goal setting**: lose, maintain or gain at a chosen rate per week, with protein and fat preferences, and an estimated finish date.

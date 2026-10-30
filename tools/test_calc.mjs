@@ -497,6 +497,37 @@ test('makeCustomFood per serving without grams → servingOnly food', () => {
   assert.throws(() => foods.makeCustomFood({ name: 'X', per: 'serving', servingGrams: -5, cal: 1, p: 0, c: 0, f: 0 }));
 });
 
+test('makeCustomFood origin', () => {
+  const f = foods.makeCustomFood({ id: 'off:123', name: 'Chips', barcode: '123', per: '100g', cal: 536, p: 7, c: 53, f: 35, origin: 'off' });
+  assert.equal(f.origin, 'off');
+  assert.equal(f.source, 'custom');
+  assert.equal(f.id, 'off:123');
+  assert.equal(f.barcode, '123');
+  const g = foods.makeCustomFood({ name: 'Bar', per: '100g', cal: 400, p: 20, c: 50, f: 10 });
+  assert.equal('origin' in g, false);
+  const h = foods.makeCustomFood({ name: 'Bar', per: '100g', cal: 400, p: 20, c: 50, f: 10, origin: null });
+  assert.equal('origin' in h, false);
+  const k = foods.makeCustomFood({ name: 'Bar', per: '100g', cal: 400, p: 20, c: 50, f: 10, origin: '' });
+  assert.equal('origin' in k, false);
+});
+
+test('nutritionLooksOff', () => {
+  const food = (per100, extra = {}) => ({ id: 'x', name: 'X', per100, servings: [], ...extra });
+  assert.equal(foods.nutritionLooksOff(food({ cal: 536, p: 7, c: 53, f: 35 })), null);
+  const bad = foods.nutritionLooksOff(food({ cal: 536, p: 1, c: 5, f: 3 }));
+  assert.ok(bad && bad.startsWith("calories don't match"), bad);
+  assert.equal(bad, "calories don't match the macros (536 listed, about 51 from the macros)");
+  assert.equal(foods.nutritionLooksOff(food({ cal: 0, p: 0, c: 0, f: 0 })), 'no nutrition values');
+  assert.equal(foods.nutritionLooksOff(food({})), 'no nutrition values');
+  assert.match(foods.nutritionLooksOff(food({ cal: 570, p: 60, c: 60, f: 10 })), /^more than 100 g/);
+  assert.match(foods.nutritionLooksOff(food({ cal: 950, p: 0, c: 0, f: 100 })), /^over 900 kcal/);
+  assert.equal(foods.nutritionLooksOff(food({ cal: 15, p: 1.4, c: 2.9, f: 0.2 })), null);
+  assert.equal(foods.nutritionLooksOff(food({ cal: 884, p: 0, c: 0, f: 100 })), null);
+  // servingOnly: per100 is one serving of unknown weight, so the gram checks are skipped.
+  const so = food({ cal: 760, p: 60, c: 60, f: 10 }, { servingOnly: true, servings: [{ label: '1 plate', grams: 100 }] });
+  assert.equal(foods.nutritionLooksOff(so), null);
+});
+
 test('importPack: rejects bad input, stores a good pack (valid foods only), removePack', () => {
   store.resetAll();
   assert.throws(() => packs.importPack('not json'), /not valid JSON/);

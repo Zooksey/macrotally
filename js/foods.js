@@ -633,11 +633,14 @@ export function buildEntry(food, qty, unit) {
  * per === '100g' means they are per 100 g. Pass an existing id to keep it when editing.
  * per === 'serving' with no serving grams (null / undefined / blank) makes a `servingOnly` food: the
  * numbers are for one serving of unknown weight (label from servingLabel, else "1 serving").
+ * origin: the source a food was edited from, so an edited scanned/built-in food is shown as 'Edited' and still
+ * carries its original id and barcode ('off', 'usda', 'builtin', 'pack'; a non-empty string sets `origin`, else
+ * the food has no `origin` key).
  * @param {object} o
  * @returns {object} Food
  * @throws {Error} when per === 'serving' and servingGrams is given but not a positive number
  */
-export function makeCustomFood({ id = null, name, brand = '', barcode = null, per, servingGrams, servingLabel: sLabel = '1 serving', cal, p, c, f, fiber = 0 }) {
+export function makeCustomFood({ id = null, name, brand = '', barcode = null, per, servingGrams, servingLabel: sLabel = '1 serving', cal, p, c, f, fiber = 0, origin = null }) {
   const blank = servingGrams === null || servingGrams === undefined || String(servingGrams).trim() === '';
   const servingOnly = per === 'serving' && blank;
   const sg = blank ? null : num(servingGrams);
@@ -660,5 +663,30 @@ export function makeCustomFood({ id = null, name, brand = '', barcode = null, pe
     defaultGrams: !servingOnly && sg > 0 ? sg : 100
   };
   if (servingOnly) food.servingOnly = true;
+  if (typeof origin === 'string' && origin) food.origin = origin;
   return food;
+}
+
+/**
+ * Why a food's nutrition looks wrong, or null. Per 100 g (per serving for servingOnly foods):
+ * kcal more than max(25 %, 20 kcal) away from 4p + 4c + 9f; macros over 105 g per 100 g; over 920 kcal per 100 g
+ * (pure fat is 884–900); every value zero. The gram checks are skipped for servingOnly foods (unknown weight).
+ * @param {object} food
+ * @returns {string|null} short reason for the user, e.g. "calories don't match the macros (540 listed, about 320 from the macros)"
+ */
+export function nutritionLooksOff(food) {
+  const per = (food && food.per100) || {};
+  const cal = Number(per.cal) || 0;
+  const p = Number(per.p) || 0;
+  const c = Number(per.c) || 0;
+  const f = Number(per.f) || 0;
+  const servingOnly = !!(food && food.servingOnly);
+  if (!cal && !p && !c && !f) return 'no nutrition values';
+  if (!servingOnly && p + c + f > 105) return 'more than 100 g of protein, carbs and fat per 100 g';
+  if (!servingOnly && cal > 920) return 'over 900 kcal per 100 g';
+  const est = 4 * p + 4 * c + 9 * f;
+  if (cal > 0 && est > 0 && Math.abs(cal - est) > Math.max(0.25 * Math.max(cal, est), 20)) {
+    return `calories don't match the macros (${Math.round(cal)} listed, about ${Math.round(est)} from the macros)`;
+  }
+  return null;
 }

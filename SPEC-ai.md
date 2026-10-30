@@ -354,3 +354,17 @@ at the nutrients. Now a candidate's head words (name before the first comma, min
 item's own words, synonyms or brand, unless the numbers agree (`same`) or it is a close library food; among
 the survivors the nutrients pick the variant (tiers, section 6.3). `compareNutrients` reports `far`, and a
 non-label match that is far off defaults to Claude's version. APP_VERSION 1.6.6, sw VERSION v17.
+
+## 12. Label photo in the food editor (v1.6.7)
+
+The custom food editor (`openCustomFood` in js/modals/food.js, also used for "Edit food" on any food) has a
+"Read the nutrition label" button when `aiConfigured(state)`. The photo goes through `downscaleImage` and one
+`askAi` call (same endpoint, schema and system prompt; no server change) with the text:
+`Nutrition label photo[ for {name}][ by {brand}]. Read the Nutrition Facts panel and report its values per
+labelled serving (or per 100 g if that is how the panel is printed). One item.` (name and brand are whatever
+the form holds). Only `items[0]` is used: it fills the serving label, serving grams (blank when null, so the
+food becomes servingOnly), the per toggle (`per === '100g'` → 100 g, else serving) and cal/p/c/f/fiber (rounded
+to 0.1); name and brand only when those fields are empty; the barcode is never touched. A confidence other than
+`label` adds "(no clear panel found, numbers are an estimate)" to the result line. A seconds counter and Cancel
+show while it reads (the form's Save is disabled); Cancel or closing the sheet aborts. Nothing is saved until
+the user taps Save food.

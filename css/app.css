@@ -1327,6 +1327,35 @@ input[type="checkbox"] {
   margin-top: 0;
 }
 
+/* Detail sheet: "These numbers look off" line (icon sized like .icon-sm, nudged to the first text line). */
+.detail-warn {
+  margin: 4px 0 2px;
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.detail-warn .icon {
+  flex: none;
+  margin-top: 2px;
+}
+
+/* Custom food editor: "Read the nutrition label" photo fill. */
+.label-read {
+  margin: 4px 0 8px;
+}
+
+.label-read .hint {
+  margin: 6px 2px 0;
+}
+
+.label-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 2px;
+}
+
 /* Scanner */
 .scanner {
   position: relative;
