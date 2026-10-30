@@ -4,7 +4,7 @@
 import { toast, requestRender } from './ui.js';
 
 /** Bump together with VERSION in sw.js when deploying. Shown in Settings. */
-export const APP_VERSION = '1.6.3';
+export const APP_VERSION = '1.6.4';
 
 let registration = null;
 let updateReady = false;
@@ -16,7 +16,7 @@ let updateReady = false;
 export async function registerAppUpdates() {
   if (!('serviceWorker' in navigator)) return;
   try {
-    registration = await navigator.serviceWorker.register('./sw.js');
+    registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
   } catch {
     return; // insecure context, unsupported, or blocked: the app still works
   }

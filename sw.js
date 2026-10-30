@@ -1,7 +1,9 @@
-/* MacroTally service worker: precached app shell, network-first for same-origin GETs. */
+/* MacroTally service worker: versioned, precached app shell served cache-first; network-first for everything
+   else on this origin. The shell is fetched with cache: 'reload' so the browser's HTTP cache (GitHub Pages sends
+   max-age=600) can never feed an old file into a new version. */
 
 /** Bump to invalidate old caches. */
-const VERSION = 'v14';
+const VERSION = 'v15';
 const CACHE = `macrotally-${VERSION}`;
 
 /** App shell, relative to the service worker scope (works from a sub-path). */
@@ -76,14 +78,20 @@ const SHELL = [
   './js/modals/ai.js'
 ];
 
+/** Absolute URLs (no query) of the shell, for the fetch handler. */
+const SHELL_URLS = new Set(SHELL.map((u) => new URL(u, self.location.href).href));
+
+/** A request that bypasses the HTTP cache, so a new version precaches what is on the server now. */
+const fresh = (url) => new Request(url, { cache: 'reload' });
+
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
     try {
-      await cache.addAll(SHELL);
+      await cache.addAll(SHELL.map(fresh));
     } catch {
       // One missing/failed file must not break install: add individually.
-      await Promise.allSettled(SHELL.map((url) => cache.add(url)));
+      await Promise.allSettled(SHELL.map((url) => cache.add(fresh(url))));
     }
     await self.skipWaiting();
   })());
@@ -104,9 +112,19 @@ self.addEventListener('fetch', (event) => {
   // Cross-origin (food APIs, CDN): network only, never cached.
   if (url.origin !== self.location.origin) return;
 
+  const key = `${url.origin}${url.pathname}`;
+  const isShell = SHELL_URLS.has(key) || req.mode === 'navigate';
+
   event.respondWith((async () => {
+    // Shell files come from this version's precache, so one load never mixes two versions and a reload after
+    // "New version ready" shows the new one even while the browser's HTTP cache still holds the old files.
+    if (isShell) {
+      const cache = await caches.open(CACHE);
+      const cached = await cache.match(req.mode === 'navigate' ? new URL('./index.html', self.registration.scope).href : key);
+      if (cached) return cached;
+    }
     try {
-      const res = await fetch(req);
+      const res = await fetch(isShell ? fresh(req.url) : req);
       if (res && res.ok && res.type === 'basic') {
         const copy = res.clone();
         event.waitUntil(caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {}));
