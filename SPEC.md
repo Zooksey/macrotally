@@ -339,6 +339,8 @@ export function confirmDialog(message, { okLabel = 'OK', danger = false } = {}):
 ```
 `ui.js` registers `on('close-modal', el => closeModal(el.closest('.modal-backdrop')))`.
 
+Keyboard: `ui.js` listens to `visualViewport` resize/scroll and sets `--vv-top`, `--vv-h` and the `kb-open` class on `<html>` when the visual viewport is more than 80 px shorter than the window (the iOS on-screen keyboard). `.kb-open .modal-backdrop` is then pinned to the visible area (`top: var(--vv-top); height: var(--vv-h)`) so sheets sit above the keyboard instead of behind it.
+
 ---
 
 ## js/app.js (UI)

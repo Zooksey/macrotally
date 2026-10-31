@@ -1158,6 +1158,19 @@ input[type="checkbox"] {
   margin: 4px auto 6px;
 }
 
+/* While the on-screen keyboard is up (js/ui.js sets .kb-open and --vv-*), pin the sheet to the visible area. */
+.kb-open .modal-backdrop {
+  top: var(--vv-top, 0px);
+  bottom: auto;
+  height: var(--vv-h, 100%);
+  animation: none;
+}
+
+.kb-open .modal.sheet {
+  max-height: 100%;
+  padding-bottom: 16px;
+}
+
 @media (min-width: 700px) {
   .modal-backdrop {
     align-items: center;

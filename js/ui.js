@@ -193,6 +193,27 @@ function syncBodyLock() {
   document.body.classList.toggle('modal-open', !!topmost());
 }
 
+/*
+ * iOS keyboard: the on-screen keyboard shrinks the visual viewport but not the layout viewport,
+ * so a bottom sheet pinned with position: fixed ends up behind it. Mirror the visual viewport into
+ * CSS variables and flag the keyboard on <html> so the sheet can pin itself to the visible area.
+ */
+function syncVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const root = document.documentElement;
+  const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+  root.style.setProperty('--vv-top', `${Math.round(vv.offsetTop)}px`);
+  root.style.setProperty('--vv-h', `${Math.round(vv.height)}px`);
+  root.classList.toggle('kb-open', kb > 80);
+}
+
+if (typeof window !== 'undefined' && window.visualViewport) {
+  window.visualViewport.addEventListener('resize', syncVisualViewport);
+  window.visualViewport.addEventListener('scroll', syncVisualViewport);
+  syncVisualViewport();
+}
+
 /**
  * Open a bottom-sheet modal. Modals stack; the newest is on top.
  * @param {string} html Inner HTML of the sheet.
