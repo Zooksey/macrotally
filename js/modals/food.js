@@ -57,12 +57,17 @@ function servingOnlyLabel(food) {
   return (s && String(s.label || '').trim()) || '1 serving';
 }
 
-/** Calories line for a result row: "390 kcal / burrito" (servingOnly) or "120 kcal / 100 g". */
+/**
+ * Calories line for a result row: "150 kcal" for the first serving when the food has one (servingHint adds
+ * its label), "390 kcal / burrito" for a servingOnly food, else "120 kcal / 100 g".
+ */
 function kcalText(food) {
   const per = food.per100 || {};
   const label = servingOnlyLabel(food);
-  if (!label) return `${fmt(per.cal)} kcal / 100 g`;
-  return `${fmt(per.cal)} kcal / ${esc(label.replace(/^1\s+/, ''))}`;
+  if (label) return `${fmt(per.cal)} kcal / ${esc(label.replace(/^1\s+/, ''))}`;
+  const s = food.servings && food.servings[0];
+  if (s && Number(s.grams) > 0) return `${fmt((Number(per.cal) || 0) * Number(s.grams) / 100)} kcal`;
+  return `${fmt(per.cal)} kcal / 100 g`;
 }
 
 /** Small source badge for library rows. */
