@@ -48,7 +48,7 @@ Check it from the Unraid shell:
 
 ```sh
 curl -H "Authorization: Bearer $AI_SECRET" http://localhost:8787/v1/health
-# {"ok":true,"version":"1.6.1","model":"sonnet"}
+# {"ok":true,"version":"1.6.8","model":"sonnet"}
 ```
 
 `docker compose logs -f` in that folder (or the container's log in the Unraid UI) shows one line per request: time, status,
@@ -86,7 +86,7 @@ over the API with a token that has **Account · Cloudflare Tunnel · Edit** and 
 ## 5. Connect the app
 
 In MacroTally: **Settings** → **AI helper** → URL `https://ai.<domain>`, the same secret as `AI_SECRET` →
-**Save** → **Test**. It should say "Connected · v1.6.1 · sonnet". The **AI add** button in the add-food sheet (tap + on a meal)
+**Save** → **Test**. It should say "Connected · v1.6.8 · sonnet". The **AI add** button in the add-food sheet (tap + on a meal)
 then works.
 
 If the app is hosted somewhere other than the default origins (your own GitHub Pages user, a custom domain), add
@@ -97,7 +97,7 @@ that origin (scheme + host, no path) to `ALLOWED_ORIGINS`, or the browser will b
 All responses are JSON. Every request except `OPTIONS` needs `Authorization: Bearer <AI_SECRET>` (else 401
 `{"error":"bad secret"}`).
 
-- `GET /v1/health` → `{"ok":true,"version":"1.6.1","model":"sonnet"}`
+- `GET /v1/health` → `{"ok":true,"version":"1.6.8","model":"sonnet"}`
 - `POST /v1/food` with
   `{ "text": "71g of these", "images": [{ "data": "<base64, no data: prefix>", "mime": "image/jpeg" }, ...] }`
   (text up to 2000 characters; up to 4 images, each up to 4 MB of base64, `mime` `image/jpeg` or `image/png`;

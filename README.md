@@ -200,7 +200,7 @@ There is still no server: the gist lives in your own GitHub account and the app 
 
 ## AI add (a Claude helper on your own server)
 
-The **AI add** button in the add-food sheet (tap **+** on a meal) lets you describe what you ate ("71 g of Dot's pretzels"), take or choose a photo of the package or plate, or both. Claude identifies each food, reads the nutrition label from the photo or looks it up on the web, and works out how much you had. You confirm the result before anything is logged.
+The **AI add** button in the add-food sheet (tap **+** on a meal) lets you describe what you ate ("71 g of Dot's pretzels"), take or choose a photo of the package or plate, or both. Claude identifies each food, reads the nutrition label from the photo or looks it up on the web, and works out how much you had. Paste a recipe and ask for "one entry per slice" and you get a single dish with the whole recipe divided by the yield. You confirm the result before anything is logged.
 
 This is optional and off until you set it up. It needs:
 
@@ -210,7 +210,7 @@ This is optional and off until you set it up. It needs:
 Setting up the server (login token, Docker, Cloudflare Tunnel) is described in [server/README.md](server/README.md). Then, in the app:
 
 1. **Settings** → **AI helper** → enter the helper's URL (e.g. `https://ai.example.com`) and the secret you put in the server's `AI_SECRET`.
-2. Tap **Save AI helper**, then open **AI helper** again and tap **Test**. It should say "Connected · v1.6.1 · sonnet".
+2. Tap **Save AI helper**, then open **AI helper** again and tap **Test**. It should say "Connected · v1.6.8 · sonnet".
 
 Using it: tap **+** on a meal, then **AI add**, type and/or add photos, tap **Ask Claude** and wait 20 to 40 seconds. You can attach up to 4 photos to one ask, for example the front of the pack (name, brand, flavour) plus the Nutrition Facts panel; Claude then reads the numbers straight off the panel. Each photo has its own remove button. You get one card per food with:
 

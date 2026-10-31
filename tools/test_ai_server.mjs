@@ -217,7 +217,7 @@ test('buildPrompt with several photos', () => {
   assert.equal(srv.buildPrompt({ text: 'a banana', photoNames: [] }), 'User says: "a banana"');
 });
 test('limits', () => {
-  assert.equal(srv.VERSION, '1.6.1');
+  assert.equal(srv.VERSION, '1.6.8');
   assert.equal(srv.MAX_BODY, 12 * 1024 * 1024);
   assert.equal(srv.MAX_IMAGE_CHARS, 4 * 1024 * 1024);
 });

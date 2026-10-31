@@ -160,7 +160,7 @@ function composeHtml(ctx) {
   return `${head(`AI add to ${ctx.meal}`)}
     <form class="ai-compose" data-submit="ai-ask">
       <label class="field"><span>Description</span>
-        <textarea name="text" rows="3" maxlength="${MAX_AI_TEXT}" autocomplete="off" placeholder="What did you eat? e.g. 71 g of Dot's pretzels" data-input="ai-text">${esc(ctx.text)}</textarea>
+        <textarea name="text" rows="3" maxlength="${MAX_AI_TEXT}" autocomplete="off" placeholder="What did you eat? e.g. 71 g of Dot's pretzels. Or paste a recipe and ask for one entry per slice or serving." data-input="ai-text">${esc(ctx.text)}</textarea>
       </label>
       <div class="ai-photo-row">
         ${thumbs}

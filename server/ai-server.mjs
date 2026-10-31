@@ -17,7 +17,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** Server version, reported by GET /v1/health (matches the app's APP_VERSION). */
-export const VERSION = '1.6.1';
+export const VERSION = '1.6.8';
 /** Largest accepted request body (bytes). */
 export const MAX_BODY = 12 * 1024 * 1024;
 /** Longest accepted description. */

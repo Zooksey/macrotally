@@ -368,3 +368,13 @@ to 0.1); name and brand only when those fields are empty; the barcode is never t
 `label` adds "(no clear panel found, numbers are an estimate)" to the result line. A seconds counter and Cancel
 show while it reads (the form's Save is disabled); Cancel or closing the sheet aborts. Nothing is saved until
 the user taps Save food.
+
+## 13. Recipes (v1.6.8)
+
+A pasted recipe with "one entry per slice/serving/batch" used to come back as one item per ingredient. system.txt
+now tells Claude to total the recipe from USDA values for staples (no web search), divide by the yield (stated, else
+inferred: 8 slices of bread make 8 slices of French toast) and return ONE servingOnly item named for the dish, per
+"serving", servingLabel "1 slice", servingGrams null, servings 1, confidence "estimate", with the yield and the
+whole recipe's kcal in notes. Verified locally against the real CLI: the French toast recipe (8 slices bread, 4 eggs,
+2/3 cup milk, sugar, vanilla, cinnamon, salt, 2 tbsp butter) returns "French toast · 1 slice · 157 kcal" in 16 s.
+The compose placeholder mentions recipes. Server VERSION 1.6.8, APP_VERSION 1.6.8, sw v19.

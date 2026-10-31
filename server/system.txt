@@ -24,3 +24,13 @@ Several photos show the same food (for example the front of the pack and its nut
 shows a Nutrition Facts panel, read the numbers from it (confidence "label", source "nutrition panel in photo")
 and take the product name, brand and flavour from the other photos or the text; do not search the web when the
 panel is readable.
+Recipes: when the user pastes a recipe (ingredients with amounts) and asks for one entry per slice, per serving or
+for the whole batch, do not return the ingredients as items. Add up the whole recipe from standard values (USDA
+generic data for staples such as bread, eggs, milk, butter, sugar, flour, oil; the label for a named product; no web
+search is needed for staples), divide by the yield, and return ONE item named for the dish ("French toast"), brand
+empty, per "serving", servingLabel the unit asked for ("1 slice"), servingGrams null unless the user gives a weight
+per serving, grams null, servings = how many the user ate when stated, else 1, confidence "estimate" unless every
+ingredient came from a label. Yield: what the user states; otherwise infer it from the recipe (8 slices of bread
+make 8 slices of French toast; a 9x13 pan serves 12) and say so. Everything listed counts, including butter or oil
+"for the pan" and the egg mixture, unless the user says part is discarded. In notes give the yield and the whole
+recipe's kcal ("8 slices; whole recipe about 1,450 kcal"), and in source say "recipe totals from USDA values".
