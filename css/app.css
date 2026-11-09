@@ -1223,6 +1223,47 @@ input[type="checkbox"] {
   margin-bottom: 0;
 }
 
+/* Help topics (Settings → How to use the app). */
+.help-sheet h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 18px 0 6px;
+}
+
+.help-sheet p,
+.help-sheet li {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.help-sheet p {
+  margin: 6px 0;
+}
+
+.help-sheet ul,
+.help-sheet ol {
+  padding-left: 20px;
+  margin: 6px 0;
+}
+
+.help-sheet li + li {
+  margin-top: 4px;
+}
+
+.help-sheet p.muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.help-sheet .help-body > :first-child {
+  margin-top: 0;
+}
+
+.help-sheet .help-body > :last-child {
+  margin-bottom: 0;
+}
+
 .head-actions {
   display: flex;
   flex: none;

@@ -52,6 +52,8 @@ The camera needs a secure address (`https://` or `localhost`), so scanning will 
 3. Weigh yourself most mornings and log it on the **Weight** tab. The trend line is what to watch.
 4. After about a week of complete logging and weigh-ins, the **Plan** tab switches the expenditure estimate from the formula to the adaptive one, and your calorie target updates every week. Tap **Recalculate now** any time.
 
+The app has built-in instructions for every part of it under **Settings → How to use the app**.
+
 Two rules make the adaptive estimate accurate: log a day completely or not at all (unlogged days are ignored, half-logged days drag the estimate down), and weigh in often.
 
 ## Running locally

@@ -1,5 +1,5 @@
-// MacroTally — Settings view: grouped rows (You, Food, Sync, Data) that each open their own sheet
-// (js/modals/settings.js), plus the About card. Nothing on this page is editable directly.
+// MacroTally — Settings view: the "How to use the app" help rows (js/modals/help.js), then grouped rows (You, Food,
+// Sync, Data) that each open their own sheet (js/modals/settings.js), plus the About card. Nothing on this page is editable directly.
 import { state } from '../store.js';
 import { REGIONS } from '../foods.js';
 import { esc, fmt, icon, on, toast, requestRender } from '../ui.js';
@@ -8,6 +8,7 @@ import { driveConfigured, loadGIS } from '../drive.js';
 import { aiConfigured } from '../ai.js';
 import { APP_VERSION, checkForUpdate, updateAvailable } from '../update.js';
 import { openSetting, cmToFtIn, plural, relativeTime, isStandalone, ensurePacksLoaded } from '../modals/settings.js';
+import { HELP_TOPICS } from '../modals/help.js'; // also registers the 'open-help' action
 
 // Moved to js/modals/settings.js; re-exported so existing imports (setup wizard, tools) keep working.
 export { ACTIVITY_LEVELS, activityOptions, cmToFtIn, heightFields, readHeightCm } from '../modals/settings.js';
@@ -18,6 +19,18 @@ function row(kind, title, sub) {
           <div class="row-main">
             <div class="row-title">${esc(title)}</div>
             <div class="row-sub">${esc(sub)}</div>
+          </div>
+          <span class="chev">${icon('right')}</span>
+        </button>`;
+}
+
+/** A help row: opens that topic's sheet (js/modals/help.js). */
+function helpRow(t) {
+  return `
+        <button type="button" class="row" data-action="open-help" data-topic="${esc(t.id)}">
+          <div class="row-main">
+            <div class="row-title">${esc(t.title)}</div>
+            <div class="row-sub">${esc(t.sub)}</div>
           </div>
           <span class="chev">${icon('right')}</span>
         </button>`;
@@ -99,6 +112,7 @@ export function settingsView() {
   if (!isStandalone()) dataRows.push(row('install', 'Install', 'Add MacroTally to your home screen'));
   return `
     <header class="topbar"><h1>Settings</h1></header>
+    ${group('How to use the app', HELP_TOPICS.map((t) => helpRow(t)))}
     ${group('You', [
       row('profile', 'Profile', profileSub()),
       row('meals', 'Meals', (state.meals || []).join(', '))
