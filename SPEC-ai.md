@@ -280,7 +280,9 @@ After the Weight feed card. Form `save-ai`: Secret (`type="password"`, required)
 placeholder is `DEFAULT_AI_URL`; blank or the default typed out is stored as `''`; anything else goes through
 `normalizeUrl`). Button `ai-test` shows "Connected · v1.6.0 · sonnet" or the error. Status line:
 "Last answer <relative time>" / "Last error: …" / "Not set up". Hint: "Runs Claude on the owner's server; see
-the README to run your own." Clearing the secret and saving turns it off.
+the README to run your own." Clearing the secret and saving turns it off. When on, `ai-copy-secret` copies the
+saved secret to the clipboard (toast "Secret copied") and, where `navigator.share` exists, `ai-share-secret`
+opens the share sheet with the secret and the two-line setup instruction, so another phone can be set up by text.
 
 ### 6.7 Misc
 

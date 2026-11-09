@@ -319,8 +319,10 @@ function aiBody() {
       <div class="btn-stack">
         <button type="submit" class="btn btn-primary btn-block">Save AI helper</button>
         ${on ? '<button type="button" class="btn btn-ghost btn-block" data-action="ai-test">Test</button>' : ''}
+        ${on ? '<button type="button" class="btn btn-ghost btn-block" data-action="ai-copy-secret">Copy secret</button>' : ''}
+        ${on && typeof navigator !== 'undefined' && typeof navigator.share === 'function' ? '<button type="button" class="btn btn-ghost btn-block" data-action="ai-share-secret">Share secret…</button>' : ''}
       </div>
-      <p class="hint">Runs Claude on the owner's server; see the README to run your own. Clear the secret and save to turn it off.</p>
+      <p class="hint">Runs Claude on the owner's server; see the README to run your own. Clear the secret and save to turn it off.${on ? ' Copy or share the secret to set up another phone: it only needs the secret.' : ''}</p>
     </form>`;
 }
 
@@ -730,6 +732,71 @@ on('save-ai', (form) => {
   toast('AI helper saved');
   closeSheetOf(form);
   requestRender();
+});
+
+/** Saved secret, or '' when the helper is off. */
+function savedSecret() {
+  return String((state.ai && state.ai.secret) || '').trim();
+}
+
+/** Older copy path for browsers without the async clipboard (or when it refuses): hidden textarea + execCommand. */
+function legacyCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  return ok;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // fall through to the legacy path
+    }
+  }
+  return legacyCopy(text);
+}
+
+on('ai-copy-secret', async (el) => {
+  const secret = savedSecret();
+  if (!secret) return;
+  if (await copyText(secret)) {
+    toast('Secret copied');
+    return;
+  }
+  // Last resort: reveal the secret in its field and select it so it can be copied by hand.
+  const input = el.closest('form') && el.closest('form').querySelector('[name="aiSecret"]');
+  if (input) {
+    input.type = 'text';
+    input.focus();
+    input.select();
+  }
+  toast("Couldn't copy here. The secret is shown above: select and copy it.", { kind: 'error' });
+});
+
+on('ai-share-secret', async () => {
+  const secret = savedSecret();
+  if (!secret || typeof navigator.share !== 'function') return;
+  try {
+    await navigator.share({ title: 'MacroTally AI helper', text: `MacroTally AI helper secret: ${secret}
+In the app: Settings → AI helper → paste it in Secret → Save.` });
+  } catch (err) {
+    if (!(err && err.name === 'AbortError')) toast("Couldn't open the share sheet", { kind: 'error' });
+  }
 });
 
 on('ai-test', async (el) => {
