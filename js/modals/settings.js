@@ -10,7 +10,7 @@ import { openSetup } from './setup.js';
 import { listPacks, importPack, removePack, setPackEnabled, loadPacks, packsLoaded } from '../packs.js';
 import { driveConfigured, loadGIS, connectDrive, disconnectDrive, backupNow, fetchBackup, applyBackup } from '../drive.js';
 import { syncWeightFeed, parseGistId } from '../feed.js';
-import { aiConfigured, normalizeUrl, testAi } from '../ai.js';
+import { aiConfigured, aiUrl, normalizeUrl, testAi, DEFAULT_AI_URL } from '../ai.js';
 
 /* ------------------------------------------------------------------ */
 /* Shared helpers (also used by the Settings list and the setup wizard) */
@@ -307,19 +307,20 @@ function aiBody() {
   return `
     <form class="sheet-form" id="ai-helper" data-submit="save-ai">
       <p class="small">Lets <strong>AI add</strong> in the add-food sheet ask Claude what you ate, from a description or a photo of the label.</p>
-      <label class="field"><span>Helper URL</span>
-        <input name="aiUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(a.url)}" placeholder="https://ai.example.com">
-      </label>
       <label class="field"><span>Secret</span>
-        <input name="aiSecret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(a.secret)}">
+        <input name="aiSecret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(a.secret)}" placeholder="The server's AI_SECRET">
       </label>
+      <label class="field"><span>Helper URL <span class="muted">(optional)</span></span>
+        <input name="aiUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(a.url)}" placeholder="${esc(DEFAULT_AI_URL)}">
+      </label>
+      <p class="hint">Leave the URL blank to use ${esc(aiUrl(state).replace(/^https?:\/\//, ''))}; only the secret is needed.</p>
       ${status}
       ${test}
       <div class="btn-stack">
         <button type="submit" class="btn btn-primary btn-block">Save AI helper</button>
         ${on ? '<button type="button" class="btn btn-ghost btn-block" data-action="ai-test">Test</button>' : ''}
       </div>
-      <p class="hint">Runs Claude on your own server; see the README for setup. Clear both fields and save to turn it off.</p>
+      <p class="hint">Runs Claude on the owner's server; see the README to run your own. Clear the secret and save to turn it off.</p>
     </form>`;
 }
 
@@ -709,16 +710,20 @@ on('save-ai', (form) => {
     requestRender();
     return;
   }
-  if (!rawUrl || !secret) {
-    toast(rawUrl ? 'Enter the secret too' : "Enter the helper's URL too", { kind: 'error' });
+  if (!secret) {
+    toast('Enter the secret', { kind: 'error' });
     return;
   }
-  let url;
-  try {
-    url = normalizeUrl(rawUrl);
-  } catch (err) {
-    toast(err.message, { kind: 'error' });
-    return;
+  // Blank URL (or the default typed out) means "use the built-in address".
+  let url = '';
+  if (rawUrl) {
+    try {
+      url = normalizeUrl(rawUrl);
+    } catch (err) {
+      toast(err.message, { kind: 'error' });
+      return;
+    }
+    if (url === DEFAULT_AI_URL) url = '';
   }
   if (url !== a.url || secret !== a.secret) Object.assign(a, { url, secret, lastOk: null, lastError: null });
   save();

@@ -15,14 +15,28 @@ export const MAX_AI_TEXT = 2000;
 /** Most photos per ask (the helper's limit too). */
 export const MAX_AI_PHOTOS = 4;
 
+/** Helper address used when Settings leaves the URL blank (the owner's server). */
+export const DEFAULT_AI_URL = 'https://ai.zookz.net';
+
 /**
- * true when the AI helper is set up (url and secret both non-empty).
+ * The helper address in use: the saved URL, or DEFAULT_AI_URL when none is saved.
+ * @param {object} [s] app state (defaults to the live state)
+ * @returns {string} without a trailing slash
+ */
+export function aiUrl(s = state) {
+  const ai = s && s.ai;
+  const saved = String((ai && ai.url) || '').trim().replace(/\/+$/, '');
+  return saved || DEFAULT_AI_URL;
+}
+
+/**
+ * true when the AI helper is set up: a secret is saved (the URL falls back to DEFAULT_AI_URL).
  * @param {object} [s] app state (defaults to the live state)
  * @returns {boolean}
  */
 export function aiConfigured(s = state) {
   const ai = s && s.ai;
-  return !!(ai && String(ai.url || '').trim() && String(ai.secret || '').trim());
+  return !!(ai && String(ai.secret || '').trim());
 }
 
 /**
@@ -130,7 +144,7 @@ function cancelled() {
 
 async function call(path, { method = 'GET', body, signal, timeoutMs }) {
   if (!aiConfigured(state)) throw new Error('Set up the AI helper in Settings');
-  const base = String(state.ai.url).trim().replace(/\/+$/, '');
+  const base = aiUrl(state);
   const ctrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {

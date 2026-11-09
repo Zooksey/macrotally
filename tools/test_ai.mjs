@@ -66,10 +66,14 @@ test('ai defaults and repair', () => {
   store.replaceState({ version: 1, diary: {}, ai: 'nope' });
   assert.deepEqual(store.state.ai, { url: '', secret: '', lastOk: null, lastError: null });
   assert.equal(ai.aiConfigured(store.state), false);
-  store.state.ai.url = 'https://ai.example.com';
-  assert.equal(ai.aiConfigured(store.state), false);
+  assert.equal(ai.aiUrl(store.state), ai.DEFAULT_AI_URL, 'blank URL falls back to the built-in address');
+  store.state.ai.url = 'https://ai.example.com/';
+  assert.equal(ai.aiConfigured(store.state), false, 'a URL alone is not enough');
+  assert.equal(ai.aiUrl(store.state), 'https://ai.example.com');
   store.state.ai.secret = 's3cret-s3cret-s3cret';
   assert.equal(ai.aiConfigured(store.state), true);
+  store.state.ai.url = '';
+  assert.equal(ai.aiConfigured(store.state), true, 'secret alone is enough');
   store.resetAll();
 });
 

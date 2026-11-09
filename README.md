@@ -209,7 +209,7 @@ This is optional and off until you set it up. It needs:
 
 Setting up the server (login token, Docker, Cloudflare Tunnel) is described in [server/README.md](server/README.md). Then, in the app:
 
-1. **Settings** → **AI helper** → enter the helper's URL (e.g. `https://ai.example.com`) and the secret you put in the server's `AI_SECRET`.
+1. **Settings** → **AI helper** → enter the secret you put in the server's `AI_SECRET`. The helper URL is optional: blank uses the built-in address (`https://ai.zookz.net`, the project owner's server); enter your own server's URL (e.g. `https://ai.example.com`) to use that instead.
 2. Tap **Save AI helper**, then open **AI helper** again and tap **Test**. It should say "Connected · v1.6.8 · sonnet".
 
 Using it: tap **+** on a meal, then **AI add**, type and/or add photos, tap **Ask Claude** and wait 20 to 40 seconds. You can attach up to 4 photos to one ask, for example the front of the pack (name, brand, flavour) plus the Nutrition Facts panel; Claude then reads the numbers straight off the panel. Each photo has its own remove button. You get one card per food with:

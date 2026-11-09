@@ -16,8 +16,9 @@ disagree with the stored ones the card says so and offers to correct a custom fo
 amount if needed and taps Add. A new item becomes a custom food in the library (so plain search finds it next
 time) plus a diary entry.
 
-Nothing about this runs unless the user has saved a helper URL and secret in Settings. The app works exactly
-as before without it.
+Nothing about this runs unless the user has saved a helper secret in Settings. The helper URL is optional:
+blank means `DEFAULT_AI_URL` (`https://ai.zookz.net`, the owner's server; `aiUrl(state)` resolves it). The app
+works exactly as before without a secret.
 
 ## 2. Verified facts the design relies on (tested 2026-10-29 on CLI 2.1.270)
 
@@ -275,10 +276,11 @@ Keep the photo and text in memory for Ask again; discard on close. Max text 2000
 
 ### 6.6 Settings card "AI helper" (js/views/settings.js)
 
-After the Weight feed card. Form `save-ai`: URL (placeholder `https://ai.example.com`), Secret
-(`type="password"`), Save. Button `ai-test` shows "Connected · v1.6.0 · sonnet" or the error. Status line:
-"Last answer <relative time>" / "Last error: …" / "Not set up". One sentence under the card: "Runs Claude on
-your own server; see the README for setup." Clearing both fields and saving turns it off.
+After the Weight feed card. Form `save-ai`: Secret (`type="password"`, required), Helper URL (optional;
+placeholder is `DEFAULT_AI_URL`; blank or the default typed out is stored as `''`; anything else goes through
+`normalizeUrl`). Button `ai-test` shows "Connected · v1.6.0 · sonnet" or the error. Status line:
+"Last answer <relative time>" / "Last error: …" / "Not set up". Hint: "Runs Claude on the owner's server; see
+the README to run your own." Clearing the secret and saving turns it off.
 
 ### 6.7 Misc
 
