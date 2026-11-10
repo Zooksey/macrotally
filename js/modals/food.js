@@ -112,7 +112,8 @@ function normBarcode(code) {
   return String(code || '').replace(/\D/g, '').replace(/^0+/, '');
 }
 
-function localByBarcode(code) {
+/** The library food with this barcode (digits compared, leading zeros ignored), or null. */
+export function localByBarcode(code) {
   const n = normBarcode(code);
   if (!n) return null;
   return Object.values(state.foods || {}).find((f) => f && f.barcode && normBarcode(f.barcode) === n) || null;
@@ -200,6 +201,7 @@ export function openAddFood(meal, date) {
       <button type="button" class="btn btn-primary btn-scan" data-action="open-scanner"${canScan ? '' : ' disabled'}>${icon('barcode')} Scan barcode</button>
       <button type="button" class="btn btn-ghost btn-ai" data-action="ai-add">${icon('sparkle')} AI add</button>
     </div>
+    <button type="button" class="btn btn-ghost btn-block btn-photos" data-action="photo-add">${icon('camera')} Add via photo(s)</button>
     ${canScan ? '' : '<p class="hint center">Camera scanning needs a secure (https) connection and a camera.</p>'}
     <div class="search-results" hidden></div>
     <div class="library">${libraryHtml()}</div>

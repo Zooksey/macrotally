@@ -1324,6 +1324,14 @@ input[type="checkbox"] {
 
 .add-actions .btn .icon { flex: none; }
 
+.btn-photos {
+  margin-top: 8px;
+}
+
+.photo-status {
+  margin: -4px 0 12px;
+}
+
 .searching {
   display: flex;
   align-items: center;

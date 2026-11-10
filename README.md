@@ -2,7 +2,7 @@
 
 A free, account-less macro tracker you host yourself and run on your phone. It replaces the parts of MacroFactor that matter most:
 
-- **Barcode scanning** with the phone camera, looked up in the free Open Food Facts database (optionally USDA FoodData Central too).
+- **Barcode scanning** with the phone camera, looked up in the free Open Food Facts database (optionally USDA FoodData Central too). **Add via photo(s)** reads the barcode from a photo taken with the phone's own camera app instead, so there is no camera permission prompt (iPhones ask again on every launch for the live scanner).
 - **Fix a scanned food**: **Edit food** works on any food, not just your own. The corrected copy keeps the barcode, so the next scan finds your numbers, and with the AI helper set up you can photograph the Nutrition Facts panel to fill them in. Foods whose numbers don't add up (calories far from the macros, more than 100 g of macros per 100 g) get a "these numbers look off" warning.
 - **Portion scaling by weight**: log in grams, ounces or servings and watch the macros scale live.
 - **Macro tracking** per meal against daily calorie, protein, carb and fat targets.
@@ -221,6 +221,8 @@ Using it: tap **+** on a meal, then **AI add**, type and/or add photos, tap **As
 - the amount (adjust it if needed) with the calories and macros for it, and **Edit details** to change anything before saving.
 
 Untick anything you do not want, then tap **Add N to <meal>**. New foods are saved as custom foods, so next time a plain search finds them without asking Claude. If Claude got it wrong, type a correction under **Not right? Tell Claude** and tap **Ask again**.
+
+**Add via photo(s)** (the button under **Scan barcode** in the add-food sheet) is the packaged-food shortcut: snap the barcode, the Nutrition Facts panel and the front of the pack (one photo is enough), then tap **Find food**. The barcode is read from the photos on the phone. A barcode already in your foods opens that food; a lone barcode photo is looked up in Open Food Facts / USDA; otherwise all the photos go to Claude, which returns the food from the label with the barcode attached, so later scans find it. Without the AI helper it still works for the barcode alone. It uses the phone's own camera app, so it never asks for camera permission.
 
 What you type and photograph goes to your helper server and from there to Claude; nothing else from the app is sent. To turn it off, clear both fields in Settings and save.
 

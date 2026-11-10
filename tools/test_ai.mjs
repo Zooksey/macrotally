@@ -389,4 +389,35 @@ await testAsync('askAi posts with the secret, records lastOk / lastError', async
 });
 globalThis.fetch = realFetch;
 
+test('photoPlan: Add via photo(s) decision order', () => {
+  const plan = ai.photoPlan;
+  // a. a barcode already in the library wins, whatever else is there
+  assert.equal(plan({ barcode: '5000159484695', inLibrary: true, photos: 3, note: 'two', aiOn: true }), 'library');
+  assert.equal(plan({ barcode: '5000159484695', inLibrary: true, photos: 1, aiOn: false }), 'library');
+  // b. lookup: without the AI helper, any barcode; with it, only a lone photo without a note
+  assert.equal(plan({ barcode: '5000159484695', photos: 3, note: 'x', aiOn: false }), 'lookup');
+  assert.equal(plan({ barcode: '5000159484695', photos: 1, note: '', aiOn: true }), 'lookup');
+  assert.equal(plan({ barcode: '5000159484695', photos: 1, note: '   ', aiOn: true }), 'lookup');
+  assert.equal(plan({ barcode: '5000159484695', photos: [{}], aiOn: true }), 'lookup', 'photos may be the array');
+  // c. ask: AI on and a note, more photos, or no barcode
+  assert.equal(plan({ barcode: '5000159484695', photos: 1, note: 'I ate 2 servings', aiOn: true }), 'ask');
+  assert.equal(plan({ barcode: '5000159484695', photos: 2, note: '', aiOn: true }), 'ask');
+  assert.equal(plan({ barcode: null, photos: 1, aiOn: true }), 'ask');
+  assert.equal(plan({ barcode: '', photos: [{}, {}], note: 'x', aiOn: true }), 'ask');
+  // d. nothing to go on
+  assert.equal(plan({ barcode: null, photos: 2, aiOn: false }), 'none');
+  assert.equal(plan({ barcode: null, inLibrary: true, photos: 1, aiOn: false }), 'none', 'inLibrary needs a barcode');
+  assert.equal(plan(), 'none');
+});
+
+test('photoAskText: note, barcode line, fixed line', () => {
+  assert.equal(ai.photoAskText('', null), ai.PHOTO_ASK_LINE);
+  assert.equal(ai.photoAskText('  I ate 2 servings ', '012345678905'),
+    `I ate 2 servings\nBarcode on the pack: 012345678905.\n${ai.PHOTO_ASK_LINE}`);
+  assert.equal(ai.photoAskText('', '5000159484695'), `Barcode on the pack: 5000159484695.\n${ai.PHOTO_ASK_LINE}`);
+  assert.equal(ai.photoAskText('half the bag', ''), `half the bag\n${ai.PHOTO_ASK_LINE}`);
+  assert.match(ai.PHOTO_ASK_LINE, /one packaged food .*one item with the label's values/);
+  assert.ok(ai.photoAskText('x'.repeat(ai.MAX_AI_TEXT - 300), '12345678901234').length <= ai.MAX_AI_TEXT, 'longest note still fits');
+});
+
 console.log(`\n${passed} passed${process.exitCode ? ', some FAILED' : ''}`);

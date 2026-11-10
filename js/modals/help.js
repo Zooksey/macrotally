@@ -67,6 +67,8 @@ function scanningBody() {
       <li>The food opens with its numbers. Set the amount and add it as usual.</li>
     </ol>
     <p>The app checks your own foods first, then Open Food Facts and USDA, so a food you have fixed is always found with your numbers.</p>
+    <h3>No camera prompts: Add via photo(s)</h3>
+    <p>If your phone asks for camera permission every time you scan, tap <strong>Add via photo(s)</strong> instead. It uses your phone's own camera app, so it never asks. Tap <strong>Take photo</strong>, snap the barcode and tap <strong>Find food</strong>; the barcode is read from the photo and looked up as usual. With the AI helper set up, also snap the Nutrition Facts panel and the front label, and Claude reads the food from them when the barcode isn't found.</p>
     <h3>When the camera doesn't work</h3>
     <p>Type the numbers under the barcode into <strong>Or type the barcode</strong> and tap <strong>Look up</strong>. Typing a barcode into the search box works too. The camera needs a secure (https) page; if <strong>Scan barcode</strong> is greyed out, use typing instead.</p>
     <h3>Food not found</h3>
@@ -92,6 +94,8 @@ function aiBody() {
     </ol>
     <h3>Check the answer</h3>
     <p>Each food gets a card showing where the numbers came from (<strong>Label</strong>, <strong>Web</strong> or <strong>Estimate</strong>). If the food is already in your foods, that one is used. If the numbers differ, pick <strong>Use stored</strong> or Claude's numbers (<strong>Update stored</strong> for your own foods, <strong>Add corrected copy</strong> for others). Adjust the amount, fix anything with <strong>Edit details</strong>, untick what you don't want, and tap the add button (for example <strong>Add 2 to ${esc(meals()[0])}</strong>). Wrong? Type under <strong>Not right? Tell Claude</strong> and tap <strong>Ask again</strong>.</p>
+    <h3>Packaged food: Add via photo(s)</h3>
+    <p>For something in a pack, <strong>Add via photo(s)</strong> (under <strong>Scan barcode</strong>) is often quicker: snap the barcode, the Nutrition Facts panel and the front label, and tap <strong>Find food</strong>. A barcode already in your foods opens straight away. Otherwise the barcode is looked up, or Claude reads the label, and the barcode is saved with Claude's food so the next scan finds it.</p>
     <h3>Recipes</h3>
     <p>Paste a recipe and ask for one entry per slice or serving. You get one food for the dish, per slice or serving.</p>
     <p class="muted">What you type and photograph goes to the helper and on to Claude; nothing else is sent. To run your own helper, see the ${readmeLink('README')}.</p>`;

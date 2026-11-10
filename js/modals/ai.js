@@ -1,17 +1,22 @@
 // MacroTally — "AI add" sheet: describe and/or photograph what you ate, Claude (on the owner's helper server)
 // identifies it, the user confirms one card per item (matched against the foods the app already has, so no
 // duplicates), then everything is logged at once. One modal, three states re-rendered in place:
-// compose → waiting → result. See SPEC-ai.md section 6.
+// compose → waiting → result. See SPEC-ai.md section 6. The same sheet in 'photos' mode is "Add via photo(s)":
+// photos from the phone's camera app (no camera permission prompt), a barcode read from them when there is one,
+// then the library / Open Food Facts or Claude (SPEC-ai.md section 14).
 import { state, saveFood, addEntry, todayStr } from '../store.js';
-import { unitOptions, nutrientsFor, buildEntry } from '../foods.js';
+import { unitOptions, nutrientsFor, buildEntry, lookupBarcode, effectiveUsdaKey } from '../foods.js';
 import { builtinFoods, loadBuiltinFoods } from '../builtin.js';
 import { packFoods, loadPacks } from '../packs.js';
 import {
   aiConfigured, askAi, downscaleImage, foodFromAiItem, amountFromAiItem, confidenceLabel, findExisting, MAX_AI_TEXT,
-  MAX_AI_PHOTOS
+  MAX_AI_PHOTOS, photoPlan, photoAskText
 } from '../ai.js';
-import { esc, fmt, fmtQty, parseNum, icon, on, openModal, closeModal, closeAllModals, toast, requestRender } from '../ui.js';
-import { openCustomFood } from './food.js';
+import { decodeBarcodeFromFile } from '../scanner.js';
+import {
+  esc, fmt, fmtQty, parseNum, icon, on, openModal, closeModal, closeAllModals, toast, requestRender, confirmDialog
+} from '../ui.js';
+import { openCustomFood, openFoodDetail, localByBarcode } from './food.js';
 import { openSetting } from './settings.js';
 import { nav } from '../app.js';
 
@@ -59,14 +64,20 @@ function defaultMeal(date, meals) {
 
 /**
  * Open the AI add sheet for a diary date.
- * @param {{date: string, meal?: string|null, replace?: HTMLElement|null}} opts
+ * @param {{date: string, meal?: string|null, replace?: HTMLElement|null, mode?: 'ai'|'photos'}} opts
  *   meal: preselected meal (a non-empty string wins over the default meal, even when it is not in the meal list);
- *   replace: a sheet underneath (the add-food sheet) that is closed too once items are logged, not on cancel.
+ *   replace: a sheet underneath (the add-food sheet) that is closed too once items are logged, not on cancel;
+ *   mode: 'photos' is "Add via photo(s)" (barcode first, then Claude), 'ai' the plain AI add.
  * @returns {HTMLElement} backdrop
  */
-export function openAiAdd({ date, meal = null, replace = null }) {
+export function openAiAdd({ date, meal = null, replace = null, mode = 'ai' }) {
   const meals = mealList();
   const ctx = {
+    mode: mode === 'photos' ? 'photos' : 'ai',
+    barcode: null, // photos mode: digits of the first barcode read from the photos
+    decoding: 0, // photos mode: photos still being checked for a barcode
+    photoGen: 0, // photos mode: bumped when the last photo is removed, so a late barcode from it is ignored
+    waitText: '', // waiting phase line; '' means "Asking Claude…"
     date,
     meal: typeof meal === 'string' && meal ? meal : defaultMeal(date, meals),
     replace,
@@ -103,7 +114,7 @@ function render(ctx) {
   if (!sheet || ctx.closed) return;
   const top = sheet.scrollTop;
   clearInterval(ctx.timer);
-  if (ctx.phase === 'waiting') sheet.innerHTML = waitingHtml();
+  if (ctx.phase === 'waiting') sheet.innerHTML = waitingHtml(ctx);
   else if (ctx.phase === 'result') sheet.innerHTML = resultHtml(ctx);
   else sheet.innerHTML = composeHtml(ctx);
   if (ctx.phase === 'result') sheet.scrollTop = top;
@@ -114,7 +125,7 @@ function render(ctx) {
       if (out) out.textContent = `${Math.round((Date.now() - t0) / 1000)} s`;
     }, 1000);
   }
-  if (ctx.phase === 'compose') {
+  if (ctx.phase === 'compose' && ctx.mode !== 'photos') {
     const ta = sheet.querySelector('textarea');
     if (ta && !ctx.text && !ctx.photos.length) setTimeout(() => ta.focus(), 60);
   }
@@ -132,14 +143,36 @@ function head(title) {
 /* Compose                                                             */
 /* ------------------------------------------------------------------ */
 
-function composeHtml(ctx) {
-  if (!aiConfigured(state)) {
-    return `${head('AI add')}
-      <p class="small">Set up the AI helper in Settings</p>
-      <p class="hint">AI add asks Claude, running on your own server, what you ate. See the README for setup.</p>
-      <button type="button" class="btn btn-primary btn-block" data-action="ai-goto-settings">Open Settings</button>`;
+function sheetTitle(ctx) {
+  return ctx.mode === 'photos' ? 'Add via photo(s)' : 'AI add';
+}
+
+/** Whether the compose submit button can be pressed. */
+function canSubmit(ctx) {
+  if (ctx.mode === 'photos') return ctx.photos.length > 0 && ctx.decoding === 0;
+  return !!(ctx.text.trim() || ctx.photos.length);
+}
+
+function photoStatus(ctx) {
+  if (ctx.decoding > 0) return 'Checking for a barcode…';
+  if (ctx.barcode) return `Barcode ${ctx.barcode} read`;
+  return '';
+}
+
+/** Update the barcode status line and the submit button in place (keeps typed text and focus). */
+function refreshPhotoStatus(ctx) {
+  if (ctx.closed || ctx.phase !== 'compose' || !ctx.bd) return;
+  const line = ctx.bd.querySelector('.photo-status');
+  if (line) {
+    const t = photoStatus(ctx);
+    line.textContent = t;
+    line.hidden = !t;
   }
-  const canAsk = !!(ctx.text.trim() || ctx.photos.length);
+  const btn = ctx.bd.querySelector('.ai-ask-btn');
+  if (btn) btn.disabled = !canSubmit(ctx);
+}
+
+function photoRowHtml(ctx) {
   const thumbs = ctx.photos.length
     ? `<div class="ai-thumbs">${ctx.photos.map((ph, k) => `
         <div class="ai-thumb">
@@ -157,25 +190,57 @@ function composeHtml(ctx) {
           <input class="visually-hidden" type="file" accept="image/*" multiple data-change="ai-photo">
         </label>`
     : `<p class="muted small">${MAX_AI_PHOTOS} photos is the most per ask.</p>`;
+  return `<div class="ai-photo-row">
+        ${thumbs}
+        ${buttons}
+      </div>`;
+}
+
+/** Compose in photos mode: photos first, then the barcode status, an optional note (AI helper only). */
+function photosComposeHtml(ctx) {
+  const aiOn = aiConfigured(state);
+  const status = photoStatus(ctx);
+  const note = aiOn
+    ? `<label class="field"><span>Note (optional)</span>
+        <textarea name="text" rows="2" maxlength="${MAX_AI_TEXT - 300}" autocomplete="off" placeholder="e.g. I ate 2 servings" data-input="ai-text">${esc(ctx.text)}</textarea>
+      </label>`
+    : '<p class="hint">Without the AI helper only the barcode is used. Set it up in Settings → AI helper to read labels too.</p>';
+  return `${head(sheetTitle(ctx))}
+    <form class="ai-compose" data-submit="ai-ask">
+      <p class="small">Snap the barcode, the Nutrition Facts panel and the front of the pack. One is enough; more is more accurate.</p>
+      ${photoRowHtml(ctx)}
+      <p class="photo-status muted small" role="status" aria-live="polite"${status ? '' : ' hidden'}>${esc(status)}</p>
+      ${note}
+      ${ctx.error ? `<p class="error inline-error" role="alert">${esc(ctx.error)}</p>` : ''}
+      <button type="submit" class="btn btn-primary btn-block ai-ask-btn"${canSubmit(ctx) ? '' : ' disabled'}>${icon('search')} Find food</button>
+    </form>`;
+}
+
+function composeHtml(ctx) {
+  if (ctx.mode === 'photos') return photosComposeHtml(ctx);
+  if (!aiConfigured(state)) {
+    return `${head('AI add')}
+      <p class="small">Set up the AI helper in Settings</p>
+      <p class="hint">AI add asks Claude, running on your own server, what you ate. See the README for setup.</p>
+      <button type="button" class="btn btn-primary btn-block" data-action="ai-goto-settings">Open Settings</button>`;
+  }
+  const canAsk = canSubmit(ctx);
   return `${head(`AI add to ${ctx.meal}`)}
     <form class="ai-compose" data-submit="ai-ask">
       <label class="field"><span>Description</span>
         <textarea name="text" rows="3" maxlength="${MAX_AI_TEXT}" autocomplete="off" placeholder="What did you eat? e.g. 71 g of Dot's pretzels. Or paste a recipe and ask for one entry per slice or serving." data-input="ai-text">${esc(ctx.text)}</textarea>
       </label>
-      <div class="ai-photo-row">
-        ${thumbs}
-        ${buttons}
-      </div>
+      ${photoRowHtml(ctx)}
       ${ctx.error ? `<p class="error inline-error" role="alert">${esc(ctx.error)}</p>` : ''}
       <button type="submit" class="btn btn-primary btn-block ai-ask-btn"${canAsk ? '' : ' disabled'}>${icon('sparkle')} Ask Claude</button>
     </form>`;
 }
 
-function waitingHtml() {
-  return `${head('AI add')}
+function waitingHtml(ctx) {
+  return `${head(sheetTitle(ctx))}
     <div class="ai-wait" role="status" aria-live="polite">
       <span class="spinner spinner-lg" aria-hidden="true"></span>
-      <p>Asking Claude… usually 20 to 40 s</p>
+      <p>${esc(ctx.waitText || 'Asking Claude… usually 20 to 40 s')}</p>
       <p class="muted small ai-elapsed">0 s</p>
     </div>
     <button type="button" class="btn btn-ghost btn-block" data-action="ai-cancel">Cancel</button>`;
@@ -204,6 +269,8 @@ function updatedFood(it) {
     };
     if (it.aiFood.servingOnly) upd.servingOnly = true;
     else delete upd.servingOnly;
+    // Add via photo(s): a barcode read from the photos goes onto a stored food that has none, so scans find it.
+    if (!ex.barcode && it.aiFood.barcode) upd.barcode = it.aiFood.barcode;
     it.updFood = upd;
   }
   return it.updFood;
@@ -373,6 +440,7 @@ async function ask(ctx, text) {
   const ctrl = new AbortController();
   ctx.abort = ctrl;
   ctx.phase = 'waiting';
+  ctx.waitText = '';
   ctx.error = '';
   render(ctx);
   // The matching pool (built-in list + packs) loads while Claude works.
@@ -383,6 +451,10 @@ async function ask(ctx, text) {
     if (ctx.closed || seq !== ctx.seq) return;
     const items = buildItems(data.items);
     if (!items.length) throw new Error("Claude didn't return a food");
+    // Add via photo(s): one item from one pack carries the barcode read from the photos (several: none).
+    if (ctx.mode === 'photos' && ctx.barcode && data.items.length === 1 && items.length === 1) {
+      items[0].aiFood.barcode = ctx.barcode;
+    }
     ctx.items = items;
     ctx.seconds = data.seconds;
     ctx.correction = '';
@@ -398,6 +470,95 @@ async function ask(ctx, text) {
   }
 }
 
+/** The text sent to Claude for this sheet before any correction. */
+function baseText(ctx) {
+  return ctx.mode === 'photos' ? photoAskText(ctx.text, ctx.barcode) : ctx.text.trim();
+}
+
+/** Close this sheet and open the food's detail sheet (the add-food sheet stays underneath, like the scanner). */
+function openFound(ctx, food) {
+  const { meal, date } = ctx;
+  closeModal(ctx.bd);
+  openFoodDetail(food, { meal, date });
+}
+
+/**
+ * "Find food" in photos mode (SPEC-ai.md section 14): the library by barcode, else Open Food Facts / USDA by
+ * barcode (when the AI helper is off, or for a lone barcode photo without a note), else Claude with the photos.
+ */
+async function findFromPhotos(ctx) {
+  const code = ctx.barcode;
+  const aiOn = aiConfigured(state);
+  const local = code ? localByBarcode(code) : null;
+  const plan = photoPlan({ barcode: code, inLibrary: !!local, photos: ctx.photos.length, note: ctx.text, aiOn });
+  if (plan === 'library') {
+    openFound(ctx, local);
+    return;
+  }
+  if (plan === 'ask') {
+    ask(ctx, baseText(ctx));
+    return;
+  }
+  if (plan === 'none') {
+    ctx.error = "Couldn't read a barcode in the photo. Try a closer, sharper photo of the barcode, or type the numbers into the search box.";
+    render(ctx);
+    return;
+  }
+  // plan === 'lookup'
+  const seq = ++ctx.seq;
+  ctx.phase = 'waiting';
+  ctx.waitText = `Looking up ${code}…`;
+  ctx.error = '';
+  render(ctx);
+  const usdaKey = effectiveUsdaKey(state.profile);
+  let food = null;
+  let err = null;
+  try {
+    food = await lookupBarcode(code, { usdaKey });
+  } catch (e) {
+    err = e;
+  }
+  if (ctx.closed || seq !== ctx.seq) return;
+  if (food) {
+    openFound(ctx, food);
+    return;
+  }
+  if (aiOn) {
+    // Not found (or the lookup failed): Claude reads the label instead.
+    ask(ctx, baseText(ctx));
+    return;
+  }
+  if (err) {
+    ctx.phase = 'compose';
+    ctx.error = (err && err.message) || 'Lookup failed. Try again.';
+    render(ctx);
+    return;
+  }
+  const ok = await confirmDialog(`Not in Open Food Facts${usdaKey ? ' or USDA' : ''} (${code}). Create it?`, { okLabel: 'Create food' });
+  if (ctx.closed || seq !== ctx.seq) return;
+  if (ok) {
+    const { meal, date } = ctx;
+    closeModal(ctx.bd);
+    openCustomFood({ barcode: code, meal, date });
+    return;
+  }
+  ctx.phase = 'compose';
+  render(ctx);
+}
+
+/** Photos mode: look for a barcode in the original file; the first one found is kept. */
+function checkBarcode(ctx, file) {
+  const gen = ctx.photoGen;
+  ctx.decoding++;
+  refreshPhotoStatus(ctx);
+  decodeBarcodeFromFile(file).then((code) => {
+    if (ctx.closed) return;
+    ctx.decoding = Math.max(0, ctx.decoding - 1);
+    if (code && !ctx.barcode && gen === ctx.photoGen) ctx.barcode = code;
+    refreshPhotoStatus(ctx);
+  });
+}
+
 // "AI add" button in the add-food sheet: open over it with that sheet's meal and date preselected.
 on('ai-add', (el) => {
   const bd = el && el.closest('.modal-backdrop');
@@ -406,12 +567,20 @@ on('ai-add', (el) => {
   else openAiAdd({ date: todayStr(), meal: null });
 });
 
+// "Add via photo(s)" button in the add-food sheet: the same sheet in photos mode.
+on('photo-add', (el) => {
+  const bd = el && el.closest('.modal-backdrop');
+  const ctx = bd && bd._ctx;
+  if (ctx && ctx.date) openAiAdd({ date: ctx.date, meal: ctx.meal, replace: bd, mode: 'photos' });
+  else openAiAdd({ date: todayStr(), meal: null, mode: 'photos' });
+});
+
 on('ai-text', (el) => {
   const ctx = ctxOf(el);
   if (!ctx) return;
   ctx.text = el.value;
   const btn = ctx.bd.querySelector('.ai-ask-btn');
-  if (btn) btn.disabled = !(ctx.text.trim() || ctx.photos.length);
+  if (btn) btn.disabled = !canSubmit(ctx);
 });
 
 on('ai-photo', async (el) => {
@@ -420,9 +589,12 @@ on('ai-photo', async (el) => {
   if (!ctx || !files.length) return;
   const room = MAX_AI_PHOTOS - ctx.photos.length;
   if (files.length > room) toast(`Up to ${MAX_AI_PHOTOS} photos per ask; using the first ${Math.max(room, 0)}`, { kind: 'error' });
+  const take = files.slice(0, Math.max(room, 0));
+  // Photos mode: each original (full-resolution) file is checked for a barcode while the copies are shrunk.
+  if (ctx.mode === 'photos') for (const file of take) checkBarcode(ctx, file);
   // Each file is shrunk on its own: one that can't be read is skipped and the others stay.
   const added = [];
-  for (const file of files.slice(0, Math.max(room, 0))) {
+  for (const file of take) {
     try {
       added.push(await downscaleImage(file));
     } catch (err) {
@@ -440,12 +612,20 @@ on('ai-photo-remove', (el) => {
   if (!ctx) return;
   const k = Number(el.dataset.k);
   ctx.photos = ctx.photos.filter((_, i) => i !== k);
+  if (!ctx.photos.length) {
+    ctx.barcode = null;
+    ctx.photoGen++;
+  }
   render(ctx);
 });
 
 on('ai-ask', (form) => {
   const ctx = ctxOf(form);
   if (!ctx) return;
+  if (ctx.mode === 'photos') {
+    if (canSubmit(ctx) && ctx.phase === 'compose') findFromPhotos(ctx);
+    return;
+  }
   const text = ctx.text.trim();
   if (!text && !ctx.photos.length) return;
   ask(ctx, text);
@@ -453,14 +633,25 @@ on('ai-ask', (form) => {
 
 on('ai-cancel', (el) => {
   const ctx = ctxOf(el);
-  if (ctx && ctx.abort) ctx.abort.abort();
+  if (!ctx) return;
+  if (ctx.abort) {
+    ctx.abort.abort(); // ask() returns to compose
+    return;
+  }
+  if (ctx.phase === 'waiting') {
+    // A barcode lookup (no abort signal): drop its answer and go back to compose.
+    ctx.seq++;
+    ctx.phase = 'compose';
+    ctx.error = '';
+    render(ctx);
+  }
 });
 
 on('ai-again', (el) => {
   const ctx = ctxOf(el);
   if (!ctx) return;
   const corr = ctx.correction.trim();
-  const text = [ctx.text.trim(), corr ? `Correction: ${corr}` : ''].filter(Boolean).join('\n');
+  const text = [baseText(ctx), corr ? `Correction: ${corr}` : ''].filter(Boolean).join('\n');
   ask(ctx, text);
 });
 

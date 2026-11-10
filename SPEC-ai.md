@@ -382,3 +382,71 @@ inferred: 8 slices of bread make 8 slices of French toast) and return ONE servin
 whole recipe's kcal in notes. Verified locally against the real CLI: the French toast recipe (8 slices bread, 4 eggs,
 2/3 cup milk, sugar, vanilla, cinnamon, salt, 2 tbsp butter) returns "French toast · 1 slice · 157 kcal" in 16 s.
 The compose placeholder mentions recipes. Server VERSION 1.6.8, APP_VERSION 1.6.8, sw v19.
+
+## 14. Add via photo(s) (v1.7.1)
+
+Why: on iPhone the live scanner (`getUserMedia`) asks for camera permission on every launch. A file input with
+`capture="environment"` opens the system camera and never asks. So the add-food sheet gets a way to log a packaged
+food from photos: the barcode, the Nutrition Facts panel and the front label.
+
+Button: `openAddFood` (js/modals/food.js) shows a full-width `btn btn-ghost btn-block btn-photos` row under the
+`.add-actions` row: camera icon, "Add via photo(s)", `data-action="photo-add"`, always enabled (it needs neither
+https camera access nor the AI helper). "Scan barcode" and "AI add" are unchanged. food.js exports
+`localByBarcode` (library food by barcode, digits compared, leading zeros ignored) and still does not import
+js/modals/ai.js.
+
+Photos mode of the AI sheet: `openAiAdd({ date, meal, replace, mode })` with `mode: 'photos'` (default `'ai'`);
+the `photo-add` handler in js/modals/ai.js mirrors `ai-add`. The ctx gains `mode`, `barcode` (null, then the
+digits of the first barcode read), `decoding` (photos still being checked) and `waitText` (waiting line).
+- Compose, titled "Add via photo(s)": the line "Snap the barcode, the Nutrition Facts panel and the front of the
+  pack. One is enough; more is more accurate.", then the thumbnails and Take photo / Choose photo (up to
+  MAX_AI_PHOTOS), a status line (`.photo-status`: "Checking for a barcode…" while `decoding > 0`, "Barcode
+  <digits> read" once read, hidden otherwise), then an optional "Note (optional)" textarea ("e.g. I ate 2
+  servings"). The submit button "Find food" is enabled with at least one photo and `decoding === 0`. The textarea
+  is not focused on open (the keyboard would cover the photo buttons).
+- Without the AI helper the "Set up the AI helper" screen is not shown: the same compose without the note and with
+  the hint "Without the AI helper only the barcode is used. Set it up in Settings → AI helper to read labels too."
+- Picking photos: each ORIGINAL file goes to `decodeBarcodeFromFile` while its copy is downscaled; `decoding` is
+  bumped and decremented around it and only the status line and button are updated in place (typed text and focus
+  stay). The first code found sets `ctx.barcode`; later ones never overwrite it. Removing photos keeps the barcode
+  unless no photos remain (then it is reset to null, and a
+  barcode still being read from the removed photos is ignored).
+
+`decodeBarcodeFromFile(file)` (js/scanner.js): never throws; returns the digits or null. Loads the file with
+`createImageBitmap(file, { imageOrientation: 'from-image' })`, else an `<img>` from an object URL (revoked after).
+Native `BarcodeDetector` (same formats as the live scanner) when it reads EAN-13, taking the first value; if
+`detect` throws, ZXing is tried. Otherwise ZXing (the lazily loaded UMD): the image is drawn on a canvas whose
+longest side is at most 1600 px and decoded synchronously with `BrowserMultiFormatReader(hints).decodeBitmap(new
+BinaryBitmap(new HybridBinarizer(new HTMLCanvasElementLuminanceSource(canvas))))`, hints POSSIBLE_FORMATS (EAN-13,
+EAN-8, UPC-A, UPC-E, Code 128) and TRY_HARDER; a NotFoundException (or any error) means no barcode, and it retries
+once at 1000 px. Only values with 8 to 14 digits (after stripping non-digits) count.
+
+"Find food" (`findFromPhotos`), decided by the pure `photoPlan({ barcode, inLibrary, photos, note, aiOn })` in
+js/ai.js, in this order:
+a. `library`: a barcode was read and `localByBarcode` finds it: close this sheet and `openFoodDetail(food, { meal,
+   date })` (the add-food sheet stays underneath, as with the scanner).
+b. `lookup`: a barcode was read and (the AI helper is off, or there is exactly one photo and the note is empty):
+   waiting phase "Looking up <code>…", then `lookupBarcode(code, { usdaKey: effectiveUsdaKey(state.profile) })`.
+   Found: close and open the detail sheet. Not found or a lookup error with the AI helper on: go on to (c). Not
+   found without it: `confirmDialog("Not in Open Food Facts[ or USDA] (<code>). Create it?", { okLabel: 'Create
+   food' })` (" or USDA" when a USDA key is in use, as in the scanner); Create closes this sheet and opens
+   `openCustomFood({ barcode, meal, date })`, Cancel returns to compose. A lookup error without the AI helper
+   returns to compose with the error.
+c. `ask`: the AI helper is on: the normal `ask` flow with all the photos and the text from `photoAskText(note,
+   barcode)`: the note, then `Barcode on the pack: <code>.` when one was read, then the fixed line "These photos
+   are of one packaged food (barcode, Nutrition Facts panel and/or front label). Return it as one item with the
+   label's values." The answer shows in the normal result phase. Ask again re-sends the same photos and text plus
+   `Correction: <text>`.
+d. `none` (no barcode, no AI helper): stay in compose with "Couldn't read a barcode in the photo. Try a closer,
+   sharper photo of the barcode, or type the numbers into the search box."
+
+Cancel in the waiting phase returns to compose in both modes (an ask is aborted; a barcode lookup has no abort
+signal, so its answer is dropped by bumping `ctx.seq`). Every await is guarded by `ctx.closed` and the seq.
+
+Barcode attachment: in photos mode, when a barcode was read and Claude returned exactly one item, that item's
+`aiFood.barcode` is the code (so a new food is saved with it, and "Edit details" shows it), and `updatedFood`
+("Update stored") keeps the stored food's barcode but sets the code when the stored food has none. With several
+items nothing is attached. Later scans of that barcode then find the saved food.
+
+Tests (tools/test_ai.mjs): `photoPlan` (library, lookup without AI, lone barcode photo, note or extra photos →
+ask, no barcode → ask or none) and `photoAskText` (with and without note and barcode).

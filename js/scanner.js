@@ -201,3 +201,100 @@ export async function startScanner(video, onCode, onStatus = () => {}) {
   }
   return stop;
 }
+
+/** ZXing formats for the 1D product barcodes the app looks up (same list as the live scanner). */
+function zxFormats(ZX) {
+  return [ZX.BarcodeFormat.EAN_13, ZX.BarcodeFormat.EAN_8, ZX.BarcodeFormat.UPC_A, ZX.BarcodeFormat.UPC_E, ZX.BarcodeFormat.CODE_128];
+}
+
+/** Digits of a decoded value when it looks like a product barcode (8 to 14 digits), else null. */
+function productDigits(raw) {
+  const d = String(raw ?? '').replace(/\D/g, '');
+  return d.length >= 8 && d.length <= 14 ? d : null;
+}
+
+/**
+ * Load a photo as something drawable: an ImageBitmap (EXIF orientation applied) when createImageBitmap works,
+ * else an <img> from an object URL. cleanup() releases it.
+ * @returns {Promise<{src: ImageBitmap|HTMLImageElement, w: number, h: number, cleanup: () => void}>}
+ */
+async function loadPhoto(file) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      return { src: bmp, w: bmp.width, h: bmp.height, cleanup: () => { try { bmp.close(); } catch { /* ignore */ } } };
+    } catch { /* fall back to <img> */ }
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('unreadable photo'));
+      el.src = url;
+    });
+    return { src: img, w: img.naturalWidth || img.width, h: img.naturalHeight || img.height, cleanup: () => URL.revokeObjectURL(url) };
+  } catch (e) {
+    URL.revokeObjectURL(url);
+    throw e;
+  }
+}
+
+/** One ZXing attempt on the photo scaled so its longest side is at most `max` px; digits or null. */
+function zxingDecode(ZX, photo, max) {
+  const k = Math.min(1, max / Math.max(photo.w, photo.h));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(photo.w * k));
+  canvas.height = Math.max(1, Math.round(photo.h * k));
+  const g = canvas.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, canvas.width, canvas.height);
+  g.drawImage(photo.src, 0, 0, canvas.width, canvas.height);
+  const hints = new Map();
+  hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, zxFormats(ZX));
+  hints.set(ZX.DecodeHintType.TRY_HARDER, true);
+  const reader = new ZX.BrowserMultiFormatReader(hints);
+  try {
+    // Synchronous decode of the canvas pixels; throws NotFoundException when there is no barcode.
+    const bitmap = new ZX.BinaryBitmap(new ZX.HybridBinarizer(new ZX.HTMLCanvasElementLuminanceSource(canvas)));
+    const result = reader.decodeBitmap(bitmap);
+    return productDigits(result && (typeof result.getText === 'function' ? result.getText() : result.text));
+  } catch {
+    return null; // NotFoundException (no barcode) or a checksum / format error
+  } finally {
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+}
+
+/**
+ * Read a product barcode from a photo (a file picked or taken with the phone's camera app, so no camera
+ * permission is needed). Native BarcodeDetector when it reads EAN-13, else ZXing at 1600 px then 1000 px.
+ * Never throws.
+ * @param {Blob} file
+ * @returns {Promise<string|null>} the barcode digits (8 to 14), or null when none is found
+ */
+export async function decodeBarcodeFromFile(file) {
+  let photo = null;
+  try {
+    photo = await loadPhoto(file);
+    if (!(photo.w > 0 && photo.h > 0)) return null;
+    const formats = await nativeFormats();
+    if (formats) {
+      try {
+        const codes = await new globalThis.BarcodeDetector({ formats }).detect(photo.src);
+        for (const c of codes || []) {
+          const d = productDigits(c && c.rawValue);
+          if (d) return d;
+        }
+        return null;
+      } catch { /* detector failed on this image: try ZXing */ }
+    }
+    const ZX = await loadZXing();
+    return zxingDecode(ZX, photo, 1600) || zxingDecode(ZX, photo, 1000);
+  } catch {
+    return null;
+  } finally {
+    if (photo) photo.cleanup();
+  }
+}

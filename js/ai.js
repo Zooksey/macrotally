@@ -427,3 +427,35 @@ export function findExisting(item, food, pool, { localIds } = {}) {
   matches.sort((x, y) => x.tier - y.tier || y.lib - x.lib || x.rank - y.rank);
   return { food: matches[0].cand, cmp: matches[0].cmp };
 }
+
+/** Fixed line sent with "Add via photo(s)" asks. */
+export const PHOTO_ASK_LINE = 'These photos are of one packaged food (barcode, Nutrition Facts panel and/or front label). Return it as one item with the label\'s values.';
+
+/**
+ * What "Add via photo(s)" does with what it has (SPEC-ai.md section 14):
+ * 'library' the barcode is a food in the user's library; 'lookup' look the barcode up (Open Food Facts / USDA)
+ * when the AI helper is off, or when there is one photo and no note (a lone barcode photo); 'ask' send the photos
+ * to Claude; 'none' no barcode and no AI helper, nothing to do.
+ * @param {{barcode?: string|null, inLibrary?: boolean, photos?: number|any[], note?: string, aiOn?: boolean}} o
+ * @returns {'library'|'lookup'|'ask'|'none'}
+ */
+export function photoPlan({ barcode = null, inLibrary = false, photos = 0, note = '', aiOn = false } = {}) {
+  const n = Array.isArray(photos) ? photos.length : Number(photos) || 0;
+  const code = String(barcode || '').trim();
+  if (code && inLibrary) return 'library';
+  if (code && (!aiOn || (n === 1 && !String(note || '').trim()))) return 'lookup';
+  if (aiOn) return 'ask';
+  return 'none';
+}
+
+/**
+ * Text for an "Add via photo(s)" ask: the note, then `Barcode on the pack: <code>.` when one was read, then
+ * PHOTO_ASK_LINE (one line each, empty parts left out).
+ * @param {string} note
+ * @param {string|null} barcode
+ * @returns {string}
+ */
+export function photoAskText(note, barcode) {
+  const code = String(barcode || '').trim();
+  return [String(note || '').trim(), code ? `Barcode on the pack: ${code}.` : '', PHOTO_ASK_LINE].filter(Boolean).join('\n');
+}

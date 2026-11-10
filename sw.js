@@ -3,7 +3,7 @@
    max-age=600) can never feed an old file into a new version. */
 
 /** Bump to invalidate old caches. */
-const VERSION = 'v24';
+const VERSION = 'v25';
 const CACHE = `macrotally-${VERSION}`;
 
 /** App shell, relative to the service worker scope (works from a sub-path). */
