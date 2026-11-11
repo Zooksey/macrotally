@@ -852,12 +852,12 @@ await testAsync('searchFoods: parallel sources, built-in duplicates dropped, fai
   urls = [];
   globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes({}, 503); };
   await assert.rejects(foods.searchFoods('grilled chicken', { usdaKey: 'k', retryDelayMs: 0 }), /busy or rate-limiting/);
-  assert.equal(urls.length, 3, 'partial result was not cached (OFF tried twice, USDA once)');
+  assert.equal(urls.length, 4, 'partial result was not cached (OFF tried three times, USDA once)');
   // No key: only OFF (tried twice); its failure carries the scanning tip.
   urls = [];
   globalThis.fetch = async (u) => { urls.push(String(u)); throw new TypeError('offline'); };
   await assert.rejects(foods.searchFoods('bananas', { retryDelayMs: 0 }), /Barcode scanning still works/);
-  assert.equal(urls.length, 2);
+  assert.equal(urls.length, 3);
 });
 await testAsync('loadPacks: failures never throw (and retry), 404 → zero bundled foods, bundled + user override', async () => {
   store.resetAll();

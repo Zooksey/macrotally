@@ -264,6 +264,12 @@ export async function searchFoods(query: string, opts = {}): Promise<Food[]>
  *  token, else a whole brand token) and the food is scored as if the query were spelt that way, minus 0.75 per swapped
  *  word, so a typo ranks foods in the same order as the correct spelling; without a fuzzy map scores are unchanged. */
 export function editDistance(a: string, b: string, max = Infinity): number
+/** v1.7.3: stem() also maps a trailing "-ie" to "y" (krispie/krispies, cookie/cookies share a stem). The OFF text
+ *  search retries twice. brandAlias(query): brands typed by sound are rewritten before the online search
+ *  ("rice crispy|crispie(s)|krispy" → "rice krispies", "cheese its" → "cheez it", "fruit loops" → "froot loops",
+ *  "captain crunch" → "cap'n crunch"); searchFoodsDetailed then searches the rewritten query and returns it as
+ *  corrected / correctedQuery with a fuzzy map (original token → the brand's tokens). */
+export function brandAlias(query: string): { query: string, brand: string, fuzzy: object } | null
 export function fuzzyLimit(len: number): number
 export function fuzzyMap(query: string, { library, builtin }): { [token]: string[] } | null
 /** Scale per-100g nutrients to grams. returns {cal,p,c,f,fiber} (unrounded) */

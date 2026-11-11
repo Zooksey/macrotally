@@ -350,8 +350,11 @@ export async function lookupBarcode(code, { usdaKey = '' } = {}) {
  * @returns {Promise<{foods: object[], failed: string[], corrected: string|null, correctedQuery: string|null, fuzzy: object|null}>}
  */
 export async function searchFoodsDetailed(query, { usdaKey = '', region = 'world', onPartial = null, retryDelayMs = OFF_RETRY_DELAY_MS } = {}) {
-  const q = String(query || '').trim();
-  if (q.length < 2) return { foods: [], failed: [], corrected: null, correctedQuery: null, fuzzy: null };
+  const asked = String(query || '').trim();
+  if (asked.length < 2) return { foods: [], failed: [], corrected: null, correctedQuery: null, fuzzy: null };
+  // A brand that is commonly typed the way it sounds is searched under its real spelling.
+  const alias = brandAlias(asked);
+  const q = alias ? alias.query : asked;
   const key = String(usdaKey || '').trim();
   const cacheKey = `${region}|${key ? 'u' : '-'}|${q.toLowerCase()}`;
   let builtinIds = null;
@@ -370,7 +373,43 @@ export async function searchFoodsDetailed(query, { usdaKey = '', region = 'world
       searchCache.set(cacheKey, r);
     }
   }
-  return { foods: visible(r.foods), failed: [...r.failed], corrected: r.corrected, correctedQuery: r.correctedQuery, fuzzy: r.fuzzy };
+  const out = { foods: visible(r.foods), failed: [...r.failed], corrected: r.corrected, correctedQuery: r.correctedQuery, fuzzy: r.fuzzy };
+  if (alias) {
+    out.corrected = out.corrected || alias.brand;
+    out.correctedQuery = out.correctedQuery || alias.query;
+    out.fuzzy = { ...alias.fuzzy, ...(out.fuzzy || {}) };
+  }
+  return out;
+}
+
+/** Brands people type the way they sound: [pattern in the query, the brand's real spelling]. */
+const BRAND_ALIASES = [
+  [/\brice\s+(?:crisp(?:y|ie|ies|ys)?|krisp(?:y|ys)?)\b/i, 'rice krispies'],
+  [/\bchee[sz]e?\s*its?\b/i, 'cheez it'],
+  [/\bfruit\s+loops?\b/i, 'froot loops'],
+  [/\bcaptain\s+crunch\b/i, "cap'n crunch"]
+];
+
+/**
+ * Rewrite a query that names a brand by sound ("rice crispies" → "rice krispies").
+ * @param {string} query
+ * @returns {{query: string, brand: string, fuzzy: object}|null} the rewritten query, the brand spelling, and a
+ *   fuzzy map (original token → the brand's tokens) for rankFoods; null when no alias applies
+ */
+export function brandAlias(query) {
+  const q = String(query || '').trim();
+  for (const [re, brand] of BRAND_ALIASES) {
+    if (!re.test(q)) continue;
+    const rewritten = q.replace(re, brand);
+    if (rewritten.toLowerCase() === q.toLowerCase()) return null;
+    const before = tokenize(q);
+    const after = tokenize(rewritten);
+    const added = after.filter((t) => !before.includes(t));
+    const fuzzy = {};
+    for (const t of before) if (!after.includes(t) && added.length) fuzzy[t] = added;
+    return { query: rewritten, brand, fuzzy };
+  }
+  return null;
 }
 
 /**
@@ -391,7 +430,7 @@ const asError = (e) => (e instanceof Error ? e : new Error(String(e)));
 /** Open Food Facts text search (retried once on a network error or 429/503). Resolves to Foods. */
 function offSearch(q, region, retryDelayMs) {
   const url = `${offSearchBase(region)}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=25&sort_by=unique_scans_n&fields=${OFF_FIELDS}`;
-  return fetchJSON(url, 'Open Food Facts', { retries: 1, retryDelayMs }).then((d) =>
+  return fetchJSON(url, 'Open Food Facts', { retries: 2, retryDelayMs }).then((d) =>
     (d?.products || []).filter((p) => p && (p.product_name || p.product_name_en)).map(foodFromOFF).filter(Boolean)
   );
 }
@@ -543,7 +582,7 @@ const SYNONYMS = Object.assign(Object.create(null), {
   cilantro: ['coriander'], scallion: ['onion'], zucchini: ['squash'], courgette: ['squash', 'zucchini'],
   aubergine: ['eggplant'], prawn: ['shrimp'], mince: ['ground'], minced: ['ground'], soda: ['carbonated'],
   pop: ['carbonated'], hamburger: ['beef', 'ground'], steak: ['beef'], bacon: ['pork'], ham: ['pork'],
-  turkey: ['turkey'], pb: ['peanut'], oj: ['orange'], rotisserie: ['chicken', 'roasted']
+  turkey: ['turkey'], pb: ['peanut'], oj: ['orange'], rotissery: ['chicken', 'roasted'], crispy: ['krispy']
 });
 
 /** Stemmed synonyms of a query token (see SYNONYMS); [] when none. */
@@ -614,6 +653,8 @@ function fuzzyAlts(fuzzy, t0) {
 /** Light plural stemming so "bananas" and "banana" (or "eggs"/"egg", "oats"/"oat") compare equal. */
 function stem(w) {
   if (w.length > 3 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
+  // "-ie" singulars share the stem of their plural: "krispie"/"krispies", "cookie"/"cookies", "brownie"/"brownies".
+  if (w.length > 3 && w.endsWith('ie')) return `${w.slice(0, -2)}y`;
   if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') && !w.endsWith('us') && !w.endsWith('is')) return w.slice(0, -1);
   return w;
 }

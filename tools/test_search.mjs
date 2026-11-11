@@ -205,7 +205,7 @@ await testAsync('OFF search: no retry on timeout (AbortError) or other statuses;
   calls = 0;
   globalThis.fetch = async () => { calls++; return jsonRes({}, 503); };
   await assert.rejects(foods.searchFoods('plum tart', { retryDelayMs: 0 }), /busy or rate-limiting/);
-  assert.equal(calls, 2, 'one retry, then the error');
+  assert.equal(calls, 3, 'two retries, then the error');
 });
 
 await testAsync('USDA requests are not retried; barcode lookups are not retried', async () => {
@@ -319,10 +319,10 @@ await testAsync('second chance: other words kept, longest unmatched word replace
   assert.equal(r.correctedQuery, 'miss vickies chips');
   assert.deepEqual(ids(r.foods).sort(), ['off:41', 'usda:42']);
   assert.deepEqual(r.failed, [], 'the extra request is not a failed source');
-  assert.equal(urls.length, 5, 'OFF, USDA, USDA wildcard, OFF corrected twice (retry)');
+  assert.equal(urls.length, 6, 'OFF, USDA, USDA wildcard, OFF corrected three times (two retries)');
   urls.length = 0;
   await foods.searchFoodsDetailed('Miss Vickey chips', { usdaKey: 'k', retryDelayMs: 0 });
-  assert.equal(urls.length, 5, 'not cached after the failed extra request');
+  assert.equal(urls.length, 6, 'not cached after the failed extra request');
 });
 
 await testAsync('no second chance: a full match exists, no USDA key, short words, nothing close, or USDA failed', async () => {
@@ -357,6 +357,31 @@ await testAsync('no second chance: a full match exists, no USDA key, short words
   usdaFail = true;
   await assert.rejects(foods.searchFoodsDetailed('vickeys', { usdaKey: 'k' }), /rejected the request/, 'nothing found and USDA failed: its error');
   assert.equal(urls.length, 2, 'USDA failed: no wildcard request');
+});
+
+test('stemming: "-ie" singulars match their plurals (krispie/krispies, cookie/cookies)', () => {
+  assert.deepEqual(foods.tokenize('Rice Krispie'), foods.tokenize('rice krispies'));
+  assert.deepEqual(foods.tokenize('cookie'), foods.tokenize('Cookies'));
+  assert.deepEqual(foods.tokenize('pie'), ['pie'], 'short words are left alone');
+  const rk = { id: 'off:1', source: 'off', name: 'Rice Krispies', brand: "Kellogg's", per100: { cal: 380, p: 6, c: 87, f: 1 } };
+  const bran = { id: 'usda:2', source: 'builtin', name: 'Rice bran, crude', brand: '', per100: { cal: 316, p: 13, c: 50, f: 21 } };
+  assert.equal(foods.fullyMatches('rice krispie', rk), true);
+  assert.deepEqual(foods.rankFoods('rice krispie', [bran, rk]).map((f) => f.id), ['off:1', 'usda:2']);
+});
+
+test('brandAlias: brands typed by sound are searched under their real spelling', () => {
+  assert.equal(foods.brandAlias('rice crispie').query, 'rice krispies');
+  assert.equal(foods.brandAlias('Rice Crispy treats').query, 'rice krispies treats');
+  assert.equal(foods.brandAlias('rice krispy').query, 'rice krispies');
+  assert.equal(foods.brandAlias('cheese its').query, 'cheez it');
+  assert.equal(foods.brandAlias('fruit loops').query, 'froot loops');
+  assert.equal(foods.brandAlias('rice krispies'), null, 'already spelt right');
+  assert.equal(foods.brandAlias('crispy chicken'), null);
+  assert.equal(foods.brandAlias('rice'), null);
+  const a = foods.brandAlias('rice crispie');
+  const rk = { id: 'off:1', source: 'off', name: 'Rice Krispies', brand: "Kellogg's", per100: { cal: 380, p: 6, c: 87, f: 1 } };
+  const bar = { id: 'off:2', source: 'off', name: 'Caramelized Crisped Rice Bar', brand: '', per100: { cal: 400, p: 5, c: 70, f: 10 } };
+  assert.deepEqual(foods.rankFoods('rice crispie', [bar, rk], { fuzzy: a.fuzzy }).map((f) => f.id), ['off:1', 'off:2']);
 });
 
 globalThis.fetch = realFetch;
