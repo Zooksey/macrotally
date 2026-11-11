@@ -68,7 +68,7 @@ Then open `http://localhost:8080/`. `localhost` counts as secure, so the camera 
 
 ## Food data
 
-- [Open Food Facts](https://world.openfoodfacts.org) is always on and needs no key. Coverage of packaged foods is good but not perfect, and some entries have incomplete nutrition. If a scan is not found you can create the food once and it is remembered by barcode. Text search is limited by Open Food Facts to roughly 10 searches a minute per phone, so the app waits for you to stop typing before searching and remembers results you already fetched. Set your **Search region** in Settings so results are ranked by what is popular in your country.
+- [Open Food Facts](https://world.openfoodfacts.org) is always on and needs no key. Coverage of packaged foods is good but not perfect, and some entries have incomplete nutrition. If a scan is not found you can create the food once and it is remembered by barcode. Text search is limited by Open Food Facts to roughly 10 searches a minute per phone, so the app waits for you to stop typing before searching and remembers results you already fetched. Set your **Search region** in Settings so results are ranked by what is popular in your country. When Open Food Facts is busy the app retries once and shows USDA results in the meantime. Small typos are forgiven ("bananna", "chiken breast"), and with USDA on, a misspelt brand gets one corrected search (shown as "Showing results for …").
 - [USDA FoodData Central](https://fdc.nal.usda.gov/) adds whole foods and US branded items. Get a free API key at https://fdc.nal.usda.gov/api-key-signup and paste it into Settings.
 
 ## Built-in food list
@@ -245,7 +245,7 @@ js/views/*.js         Diary, Weight, Plan, Settings screens
 js/modals/*.js        add food, food detail, custom food, scanner, setup wizard, AI add
 sw.js                 service worker (offline app shell)
 server/               the optional AI helper service (Node + Claude Code CLI, Docker); see server/README.md
-tools/                icon generator and unit tests (`node tools/test_calc.mjs`, `node tools/test_feed.mjs`, `node tools/test_ai.mjs`, `node tools/test_ai_server.mjs`)
+tools/                icon generator and unit tests (`node tools/test_calc.mjs`, `node tools/test_feed.mjs`, `node tools/test_ai.mjs`, `node tools/test_ai_server.mjs`, `node tools/test_search.mjs`)
 ```
 
 See `SPEC.md` for the full design and the algorithms.

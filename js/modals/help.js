@@ -45,7 +45,7 @@ function loggingBody() {
     <h3>Add a food</h3>
     <ol>
       <li>Tap <strong>Add food</strong> under a meal.</li>
-      <li>Type at least two letters in the search box. Foods you have used and the built-in list show at once; online results follow when you stop typing. Each result shows the calories for the food's serving, or per 100 g.</li>
+      <li>Type at least two letters in the search box. Foods you have used and the built-in list show at once; online results follow when you stop typing. Small typos are forgiven, so "bananna" still finds bananas. Each result shows the calories for the food's serving, or per 100 g.</li>
       <li>Or pick from the <strong>Recent</strong>, <strong>Favorites</strong> and <strong>My foods</strong> tabs below the search box.</li>
       <li>Tap a food, set the amount in servings, grams or ounces, and watch the numbers update.</li>
       <li>Tap <strong>Add to ${first}</strong> (the button names whichever meal is picked under <strong>Meal</strong>).</li>

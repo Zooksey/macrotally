@@ -843,20 +843,21 @@ await testAsync('searchFoods: parallel sources, built-in duplicates dropped, fai
   await foods.searchFoods('chicken breast', { usdaKey: 'k', region: 'us' });
   assert.equal(urls.length, 0, 'session cache');
   // OFF down, USDA works: USDA results, no throw (and not cached, so the next call retries).
+  // retryDelayMs: 0 because Open Food Facts searches are now retried once on 503 / network errors.
   globalThis.fetch = async (u) => {
     if (String(u).includes('openfoodfacts')) return jsonRes({}, 503);
     return jsonRes(usda);
   };
-  assert.deepEqual((await foods.searchFoods('grilled chicken', { usdaKey: 'k' })).map((f) => f.id), ['usda:777']);
+  assert.deepEqual((await foods.searchFoods('grilled chicken', { usdaKey: 'k', retryDelayMs: 0 })).map((f) => f.id), ['usda:777']);
   urls = [];
   globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes({}, 503); };
-  await assert.rejects(foods.searchFoods('grilled chicken', { usdaKey: 'k' }), /busy or rate-limiting/);
-  assert.equal(urls.length, 2, 'partial result was not cached');
-  // No key: only OFF; its failure carries the scanning tip.
+  await assert.rejects(foods.searchFoods('grilled chicken', { usdaKey: 'k', retryDelayMs: 0 }), /busy or rate-limiting/);
+  assert.equal(urls.length, 3, 'partial result was not cached (OFF tried twice, USDA once)');
+  // No key: only OFF (tried twice); its failure carries the scanning tip.
   urls = [];
   globalThis.fetch = async (u) => { urls.push(String(u)); throw new TypeError('offline'); };
-  await assert.rejects(foods.searchFoods('bananas', {}), /Barcode scanning still works/);
-  assert.equal(urls.length, 1);
+  await assert.rejects(foods.searchFoods('bananas', { retryDelayMs: 0 }), /Barcode scanning still works/);
+  assert.equal(urls.length, 2);
 });
 await testAsync('loadPacks: failures never throw (and retry), 404 → zero bundled foods, bundled + user override', async () => {
   store.resetAll();

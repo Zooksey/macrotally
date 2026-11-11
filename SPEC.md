@@ -236,8 +236,36 @@ export function foodFromOFF(product): Food|null      // null if no usable nutrie
 export function foodFromUSDA(item): Food|null
 /** Looks up barcode: tries code as-is, then (13 digits starting with '0' → drop it), (12 digits → prefix '0'). */
 export async function lookupBarcode(code: string): Promise<Food|null>
-/** OFF search, plus USDA search when usdaKey given; USDA failures are swallowed. Dedup by id. Each fetch has an 12 s AbortController timeout. */
-export async function searchFoods(query: string, { usdaKey = '' } = {}): Promise<Food[]>
+/** OFF search, plus USDA search when usdaKey given, in parallel. Dedup by id. Each fetch has a 12 s AbortController timeout.
+ *  OFF text search only: a network TypeError or HTTP 429/503 is retried ONCE after retryDelayMs (default 1500; not on
+ *  timeout or other statuses). onPartial(foods, { source }) fires when the first source answers while the other is still
+ *  pending (with a USDA key). A failed source is swallowed when the search found foods (listed in `failed`); when nothing
+ *  was found the OFF error (else USDA's) is thrown. Searches where every request answered are cached for the session.
+ *  Spelling second chance (one extra USDA + one extra OFF request at most): when no result fullyMatches the query, a query
+ *  word of 5+ letters matched no result at all, and USDA answered, USDA is asked again with that word (the longest) cut to
+ *  its first 4 letters + '*' ("vick*"). Its foods with a name/brand word within fuzzyLimit (same first letter) are kept;
+ *  `corrected` = the most frequent such word, lowercase with apostrophes dropped but unstemmed ("Miss Vickie's" → "vickies",
+ *  which stems to "vicky" like the foods' own names), then OFF is searched with the corrected query (its failure ignored).
+ *  fuzzy = { queryToken: [stems of the matching words] } for rankFoods. */
+export async function searchFoodsDetailed(query, { usdaKey = '', region = 'world', onPartial = null, retryDelayMs = 1500 } = {}):
+  Promise<{ foods: Food[], failed: ('off'|'usda')[], corrected: string|null, correctedQuery: string|null, fuzzy: object|null }>
+/** Thin wrapper: (await searchFoodsDetailed(query, opts)).foods */
+export async function searchFoods(query: string, opts = {}): Promise<Food[]>
+/** Ranking (see the JSDoc in foods.js): tokenize, scoreFood(query, food, { localIds, favoriteIds, recentIds, fuzzy }),
+ *  rankFoods(query, foods, { limit, ...same }), fullyMatches(query, food, { fuzzy }) (every query word matched, no 0.25 factor),
+ *  searchLocal(query, { library, builtin, recents, favorites, limit }). */
+/** Typo tolerance. editDistance: Damerau-Levenshtein (adjacent swap = 1) with early exit, returns max + 1 when over max.
+ *  fuzzyLimit(len) of a stemmed query word: ≤ 3 letters → 0, 4–5 → 1, 6+ → 2; a candidate must also share the first letter.
+ *  fuzzyMap: for each query word that matches NO food of library + builtin by the normal rules, the ≤ 5 closest
+ *  name/brand tokens (smallest distance, then most common); null when none. The built-in vocabulary is cached per
+ *  `builtin` array object (food.js passes one memoized built-in + packs array that is replaced when either list changes);
+ *  the library's is rebuilt per call. searchLocal keeps its exact path and, only when no result fullyMatches, scores again
+ *  with fuzzyMap. In scoreFood a misspelt query word is swapped for the first alternative the food contains (a whole name
+ *  token, else a whole brand token) and the food is scored as if the query were spelt that way, minus 0.75 per swapped
+ *  word, so a typo ranks foods in the same order as the correct spelling; without a fuzzy map scores are unchanged. */
+export function editDistance(a: string, b: string, max = Infinity): number
+export function fuzzyLimit(len: number): number
+export function fuzzyMap(query: string, { library, builtin }): { [token]: string[] } | null
 /** Scale per-100g nutrients to grams. returns {cal,p,c,f,fiber} (unrounded) */
 export function nutrientsFor(food: Food, grams: number)
 /** All unit options for a food: [...food.servings, UNIT_G, UNIT_OZ] */
@@ -388,7 +416,7 @@ Keyboard: `ui.js` listens to `visualViewport` resize/scroll and sets `--vv-top`,
 
 `modals/food.js` exports `openAddFood(meal, date)`, `openFoodDetail(food, { meal, date, entry = null })`, `openCustomFood({ barcode = null, food = null, meal, date })`, `openScanner({ meal, date })`.
 
-- **Add food** sheet: search input (autofocus, debounced 350 ms, min 2 chars, shows spinner + "Searching Open Food Facts…"), big "Scan barcode" button (disabled with hint if `!scannerSupported()`), segmented tabs Recent / Favorites / My foods (custom), results list rows (name, brand, kcal per 100 g, serving hint), "+ Create custom food". Tapping a row → `openFoodDetail`. Search errors → inline message. Check the local library first for matches by name (instant), then API.
+- **Add food** sheet: search input (autofocus, debounced 350 ms, min 2 chars, shows spinner + "Searching Open Food Facts…"), big "Scan barcode" button (disabled with hint if `!scannerSupported()`), segmented tabs Recent / Favorites / My foods (custom), results list rows (name, brand, kcal per 100 g, serving hint), "+ Create custom food". Tapping a row → `openFoodDetail`. Search errors → inline message. Check the local library first for matches by name (instant), then API. Local results (library, built-in, packs) forgive small typos (fuzzyMap). Online results use `searchFoodsDetailed` with `onPartial`: the first source to answer (usually USDA) is merged and shown at once with the "Searching…" spinner still showing (guarded by the search sequence number), and the rest is added when it arrives. When one source failed but foods were found, a muted note under the list says so ("Open Food Facts is busy right now; showing USDA results." or the USDA equivalent); when everything failed the existing error shows. A spelling correction shows a muted `Showing results for "miss vickies"` line above the results, and the merged list is ranked with the local fuzzy map plus the search's `fuzzy` map so corrected foods rank as matches.
 - **Food detail** sheet: name/brand, qty input + unit select (`unitOptions`), live-updating macro summary (cal big; p/c/f/fiber), favorite toggle (★), per-100g line. Buttons: "Add to {meal}" (or "Save changes" + "Delete" in edit mode). On add: `saveFood(food)` (cache in library), `addEntry`, close ALL modals, toast "Added", `requestRender`. Every food that is not a `_snapshot` has an "Edit food" link (after the per-100 g line, before the barcode line) → `openCustomFood({food})`. A food with `origin` shows "Edited by you" under the name (`brand · Edited by you` when it has a brand) and an "Edited" badge in library rows.
 - **Numbers look off** (v1.6.7): the detail sheet runs `nutritionLooksOff(food)` (skipped for `_snapshot` foods) and, when it returns a reason, shows a warning line just above "Edit food": "These numbers look off: {reason}." Rules on per100 (one serving for servingOnly foods), first hit wins: cal, p, c and f all zero/absent → "no nutrition values"; not servingOnly and p + c + f > 105 → "more than 100 g of protein, carbs and fat per 100 g"; not servingOnly and cal > 920 → "over 900 kcal per 100 g" (pure fat is 884–900); est = 4p + 4c + 9f, cal > 0, est > 0 and |cal − est| > max(25 % of the larger, 20 kcal) → "calories don't match the macros ({cal} listed, about {est} from the macros)".
 - **Custom food** sheet: name, brand, barcode (prefilled from scan), serving label + serving grams, "Nutrition is per: [serving] [100 g]" toggle, cal/p/c/f/fiber inputs (numeric, inputmode decimal). Save → `makeCustomFood` → `saveFood` (and the search sheet's food cache) → `openFoodDetail`. Editing an existing food keeps its id.

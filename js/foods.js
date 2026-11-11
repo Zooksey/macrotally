@@ -205,12 +205,36 @@ export function foodFromUSDA(item) {
   };
 }
 
+/** Error a retry may cure: a network TypeError (offline, or a CORS-less 503 page) or HTTP 429/503. */
+function retryableError(message) {
+  const err = new Error(message);
+  err.retryable = true;
+  return err;
+}
+
+/** Delay before the one retry of an Open Food Facts text search (its 503s usually clear within a second or two). */
+const OFF_RETRY_DELAY_MS = 1500;
+
 /**
- * fetch JSON with a 12 s timeout and friendly errors. Returns null on HTTP 404.
+ * fetch JSON with a 12 s timeout (per attempt) and friendly errors. Returns null on HTTP 404.
+ * With retries > 0, a network TypeError or HTTP 429/503 is retried after retryDelayMs; a timeout or any
+ * other status is not.
  * @param {string} url
  * @param {string} what human name of the service, for messages
+ * @param {{retries?: number, retryDelayMs?: number}} [opts]
  */
-async function fetchJSON(url, what) {
+async function fetchJSON(url, what, { retries = 0, retryDelayMs = OFF_RETRY_DELAY_MS } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchJSONOnce(url, what);
+    } catch (err) {
+      if (attempt >= retries || !err.retryable) throw err;
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(retryDelayMs) || 0)));
+    }
+  }
+}
+
+async function fetchJSONOnce(url, what) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   let res;
@@ -220,14 +244,14 @@ async function fetchJSON(url, what) {
     if (e && e.name === 'AbortError') throw new Error(`${what} took too long to respond. Try again.`);
     // A TypeError is either offline or a blocked response (Open Food Facts answers rate-limited
     // searches with a 503 page that carries no CORS headers, which the browser reports the same way).
-    if (e instanceof TypeError) throw new Error(`Could not reach ${what}. You may be offline, or it is busy right now. Wait a moment and try again.`);
+    if (e instanceof TypeError) throw retryableError(`Could not reach ${what}. You may be offline, or it is busy right now. Wait a moment and try again.`);
     throw new Error(`Could not reach ${what}.`);
   } finally {
     clearTimeout(timer);
   }
   if (res.status === 404) return null;
   if (res.status === 401 || res.status === 403) throw new Error(`${what} rejected the request (check your API key).`);
-  if (res.status === 429 || res.status === 503) throw new Error(`${what} is busy or rate-limiting (about 10 searches a minute). Wait a moment and try again.`);
+  if (res.status === 429 || res.status === 503) throw retryableError(`${what} is busy or rate-limiting (about 10 searches a minute). Wait a moment and try again.`);
   if (!res.ok) throw new Error(`${what} is having trouble (HTTP ${res.status}). Try again later.`);
   try {
     return await res.json();
@@ -306,32 +330,57 @@ export async function lookupBarcode(code, { usdaKey = '' } = {}) {
 }
 
 /**
- * Search Open Food Facts and, when usdaKey is given, USDA FoodData Central in parallel.
- * A source's failure is swallowed as long as the other produced results. When a source failed and
- * nothing was found, the Open Food Facts error is thrown if it failed (else the USDA one).
- * Live USDA results that duplicate a loaded built-in food (same `usda:<fdcId>` id) are dropped.
- * Open Food Facts results come from the region's site, sorted there by scan popularity; callers re-rank
- * with rankFoods. Searches where every source answered are cached for the session.
+ * Search Open Food Facts and, when usdaKey is given, USDA FoodData Central in parallel, with details.
+ * - The Open Food Facts request is retried once after retryDelayMs on a network error or HTTP 429/503.
+ * - onPartial(foods, { source }) is called when the first source answers while the other is still pending
+ *   (only with a USDA key, and only when that source succeeded), so a caller can show it right away.
+ * - A source's failure is swallowed as long as the search produced foods; `failed` lists it ('off' | 'usda').
+ *   When nothing was found and a source failed, the Open Food Facts error is thrown if it failed (else USDA's).
+ * - Second chance (spelling): when no food fully matches the query (fullyMatches), some query word of 5+
+ *   letters matched no food at all, and USDA answered, ONE more USDA request replaces that word (the longest
+ *   one) by its first 4 letters + '*'. Foods with a name/brand word within fuzzyLimit of it (same first letter)
+ *   are kept; `corrected` is the most frequent such word (lowercase, apostrophes dropped, unstemmed: "Miss
+ *   Vickie's" gives "vickies", whose stem matches how the food's own name tokenizes). Then ONE more Open Food
+ *   Facts search runs with the corrected word; its failure is ignored. `correctedQuery` is the query with the
+ *   word replaced and `fuzzy` maps the query token to the stems of the matching words (pass it to rankFoods).
+ * - Live USDA results that duplicate a loaded built-in food (same `usda:<fdcId>` id) are dropped.
+ * - Searches where every request answered are cached for the session (with their correction).
  * @param {string} query
- * @param {{usdaKey?:string, region?:string}} [opts] usdaKey: pass effectiveUsdaKey()
- * @returns {Promise<object[]>} Foods, de-duplicated by id
+ * @param {{usdaKey?:string, region?:string, onPartial?:Function, retryDelayMs?:number}} [opts] usdaKey: pass effectiveUsdaKey()
+ * @returns {Promise<{foods: object[], failed: string[], corrected: string|null, correctedQuery: string|null, fuzzy: object|null}>}
  */
-export async function searchFoods(query, { usdaKey = '', region = 'world' } = {}) {
+export async function searchFoodsDetailed(query, { usdaKey = '', region = 'world', onPartial = null, retryDelayMs = OFF_RETRY_DELAY_MS } = {}) {
   const q = String(query || '').trim();
-  if (q.length < 2) return [];
+  if (q.length < 2) return { foods: [], failed: [], corrected: null, correctedQuery: null, fuzzy: null };
   const key = String(usdaKey || '').trim();
   const cacheKey = `${region}|${key ? 'u' : '-'}|${q.toLowerCase()}`;
-  let results = searchCache.get(cacheKey);
-  if (!results) {
-    const r = await searchFoodsUncached(q, { key, region });
-    results = r.foods;
+  let builtinIds = null;
+  const visible = (list) => {
+    if (!builtinIds) builtinIds = new Set(builtinFoods().map((f) => f.id));
+    return list.filter((f) => f.source !== 'usda' || !builtinIds.has(f.id));
+  };
+  let r = searchCache.get(cacheKey);
+  if (!r) {
+    const partial = typeof onPartial === 'function'
+      ? (foods, info) => { try { onPartial(visible(foods), info); } catch { /* a caller's render error must not break the search */ } }
+      : null;
+    r = await searchFoodsUncached(q, { key, region, retryDelayMs, onPartial: partial });
     if (r.complete) {
       if (searchCache.size >= 60) searchCache.delete(searchCache.keys().next().value);
-      searchCache.set(cacheKey, results);
+      searchCache.set(cacheKey, r);
     }
   }
-  const builtinIds = new Set(builtinFoods().map((f) => f.id));
-  return results.filter((f) => f.source !== 'usda' || !builtinIds.has(f.id));
+  return { foods: visible(r.foods), failed: [...r.failed], corrected: r.corrected, correctedQuery: r.correctedQuery, fuzzy: r.fuzzy };
+}
+
+/**
+ * Search Open Food Facts and, when usdaKey is given, USDA FoodData Central (see searchFoodsDetailed).
+ * @param {string} query
+ * @param {{usdaKey?:string, region?:string, onPartial?:Function, retryDelayMs?:number}} [opts]
+ * @returns {Promise<object[]>} Foods, de-duplicated by id
+ */
+export async function searchFoods(query, opts = {}) {
+  return (await searchFoodsDetailed(query, opts)).foods;
 }
 
 /** Session cache of search results, keyed by region + key presence + query, so retyping costs no request. */
@@ -339,29 +388,130 @@ const searchCache = new Map();
 
 const asError = (e) => (e instanceof Error ? e : new Error(String(e)));
 
-async function searchFoodsUncached(q, { key, region }) {
-  const offUrl = `${offSearchBase(region)}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=25&sort_by=unique_scans_n&fields=${OFF_FIELDS}`;
-  const offP = fetchJSON(offUrl, 'Open Food Facts').then((d) =>
+/** Open Food Facts text search (retried once on a network error or 429/503). Resolves to Foods. */
+function offSearch(q, region, retryDelayMs) {
+  const url = `${offSearchBase(region)}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=25&sort_by=unique_scans_n&fields=${OFF_FIELDS}`;
+  return fetchJSON(url, 'Open Food Facts', { retries: 1, retryDelayMs }).then((d) =>
     (d?.products || []).filter((p) => p && (p.product_name || p.product_name_en)).map(foodFromOFF).filter(Boolean)
   );
-  const usdaP = key
-    ? fetchJSON(
-      `${USDA_BASE}?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=25&dataType=${encodeURIComponent('Foundation,SR Legacy,Branded')}`,
-      'USDA FoodData Central'
-    ).then((d) => (d?.foods || []).map(foodFromUSDA).filter(Boolean))
-    : Promise.resolve([]);
+}
+
+/** USDA FoodData Central search (Foundation, SR Legacy, Branded). Resolves to Foods. */
+function usdaSearch(q, key) {
+  return fetchJSON(
+    `${USDA_BASE}?api_key=${encodeURIComponent(key)}&query=${encodeURIComponent(q)}&pageSize=25&dataType=${encodeURIComponent('Foundation,SR Legacy,Branded')}`,
+    'USDA FoodData Central'
+  ).then((d) => (d?.foods || []).map(foodFromUSDA).filter(Boolean));
+}
+
+async function searchFoodsUncached(q, { key, region, retryDelayMs, onPartial }) {
+  const offP = offSearch(q, region, retryDelayMs);
+  const usdaP = key ? usdaSearch(q, key) : Promise.resolve([]);
+  if (onPartial && key) {
+    // Whichever source settles first: report it if it succeeded (the other is still pending).
+    let first = true;
+    const report = (source) => [
+      (foods) => { if (first) { first = false; onPartial(foods, { source }); } },
+      () => { first = false; }
+    ];
+    offP.then(...report('off'));
+    usdaP.then(...report('usda'));
+  }
   const [off, usda] = await Promise.allSettled([offP, usdaP]);
-  const offFoods = off.status === 'fulfilled' ? off.value : [];
-  const usdaFoods = usda.status === 'fulfilled' ? usda.value : [];
-  const failed = off.status === 'rejected' || usda.status === 'rejected';
-  if (failed && !offFoods.length && !usdaFoods.length) {
+  const failed = [];
+  if (off.status === 'rejected') failed.push('off');
+  if (usda.status === 'rejected') failed.push('usda');
+  const seen = new Map();
+  const add = (list) => { for (const f of list) if (!seen.has(f.id)) seen.set(f.id, f); };
+  add(off.status === 'fulfilled' ? off.value : []);
+  add(usda.status === 'fulfilled' ? usda.value : []);
+  let complete = !failed.length;
+  let fix = null;
+  if (key && usda.status === 'fulfilled') {
+    fix = await secondChance(q, [...seen.values()], { key, region, retryDelayMs });
+    if (fix) {
+      add(fix.foods);
+      if (!fix.complete) complete = false;
+    }
+  }
+  if (failed.length && !seen.size) {
     const err = asError(off.status === 'rejected' ? off.reason : usda.reason);
     if (!key) err.message += ' Barcode scanning still works, and a free USDA key in Settings adds a second search source.';
     throw err;
   }
-  const seen = new Map();
-  for (const f of [...offFoods, ...usdaFoods]) if (!seen.has(f.id)) seen.set(f.id, f);
-  return { foods: [...seen.values()], complete: !failed };
+  const hasFix = !!(fix && fix.corrected);
+  return {
+    foods: [...seen.values()],
+    complete,
+    failed,
+    corrected: hasFix ? fix.corrected : null,
+    correctedQuery: hasFix ? fix.correctedQuery : null,
+    fuzzy: hasFix ? fix.fuzzy : null
+  };
+}
+
+/** Lowercase words of a text with apostrophes dropped, unstemmed (tokenize without the stemming). */
+function plainWords(s) {
+  if (s === null || s === undefined) return [];
+  return String(s).toLowerCase().replace(/['’`]/g, '').match(TOKEN_RE) || [];
+}
+
+/**
+ * The spelling second chance of searchFoodsUncached. Returns null when it does not apply (no request made),
+ * else { foods, corrected, correctedQuery, fuzzy, complete } (corrected null when nothing close was found).
+ */
+async function secondChance(q, found, { key, region, retryDelayMs }) {
+  const words = plainWords(q);
+  const toks = words.map(stem);
+  if (!toks.length || found.some((f) => fullyMatches(q, f))) return null;
+  let idx = -1;
+  toks.forEach((t, i) => {
+    if (t.length < 5 || /\p{N}/u.test(t) || (idx >= 0 && toks[idx].length >= t.length)) return;
+    if (!found.some((f) => { const ft = foodTokens(f); return tokenHits(t, ft.name, ft.brand, null); })) idx = i;
+  });
+  if (idx < 0) return null;
+  const tok = toks[idx];
+  const withWord = (w) => words.map((x, i) => (i === idx ? w : x)).join(' ');
+  let usdaFoods;
+  try {
+    usdaFoods = await usdaSearch(withWord(`${tok.slice(0, 4)}*`), key);
+  } catch {
+    return { foods: [], corrected: null, correctedQuery: null, fuzzy: null, complete: false };
+  }
+  const limit = fuzzyLimit(tok.length);
+  const counts = new Map(); // word → [number of kept foods containing it, distance]
+  const stems = new Set();
+  const kept = usdaFoods.filter((f) => {
+    let ok = false;
+    for (const w of new Set([...plainWords(f.name), ...plainWords(f.brand)])) {
+      const s = stem(w);
+      if (s[0] !== tok[0] || /\p{N}/u.test(s)) continue;
+      const d = editDistance(tok, s, limit);
+      if (d > limit) continue;
+      ok = true;
+      stems.add(s);
+      const c = counts.get(w);
+      if (c) c[0]++;
+      else counts.set(w, [1, d]);
+    }
+    return ok;
+  });
+  if (!kept.length) return { foods: [], corrected: null, correctedQuery: null, fuzzy: null, complete: true };
+  // Most frequent; ties → closer, then first seen.
+  let corrected = null;
+  let best = null;
+  for (const [w, c] of counts) {
+    if (!best || c[0] > best[0] || (c[0] === best[0] && c[1] < best[1])) { corrected = w; best = c; }
+  }
+  const correctedQuery = withWord(corrected);
+  let complete = true;
+  let offFoods = [];
+  try {
+    offFoods = await offSearch(correctedQuery, region, retryDelayMs);
+  } catch {
+    complete = false; // ignored, but then not cached, so the next search can fill it in
+  }
+  return { foods: [...kept, ...offFoods], corrected, correctedQuery, fuzzy: { [tok]: [...stems] }, complete };
 }
 
 /* ------------------------------------------------------------------ */
@@ -384,19 +534,84 @@ export function tokenize(s) {
   return (String(s).toLowerCase().replace(/['’`]/g, '').match(TOKEN_RE) || []).map(stem);
 }
 
-/** Light plural stemming so "bananas" and "banana" (or "eggs"/"egg", "oats"/"oat") compare equal. */
-/** Query-word synonyms (stemmed form → stemmed alternatives) bridging everyday names and USDA naming. */
-const SYNONYMS = {
+/**
+ * Query-word synonyms (stemmed form → stemmed alternatives) bridging everyday names and USDA naming.
+ * Null prototype, so a query word like "constructor" or "toString" is not mistaken for an entry.
+ */
+const SYNONYMS = Object.assign(Object.create(null), {
   oatmeal: ['oat'], porridge: ['oat'], yoghurt: ['yogurt'], chickpea: ['garbanzo'], garbanzo: ['chickpea'],
   cilantro: ['coriander'], scallion: ['onion'], zucchini: ['squash'], courgette: ['squash', 'zucchini'],
   aubergine: ['eggplant'], prawn: ['shrimp'], mince: ['ground'], minced: ['ground'], soda: ['carbonated'],
   pop: ['carbonated'], hamburger: ['beef', 'ground'], steak: ['beef'], bacon: ['pork'], ham: ['pork'],
   turkey: ['turkey'], pb: ['peanut'], oj: ['orange'], rotisserie: ['chicken', 'roasted']
-};
+});
 
 /** Stemmed synonyms of a query token (see SYNONYMS); [] when none. */
 export function synonymsOf(tok) { return SYNONYMS[tok] || []; }
 
+/* ------------------------------------------------------------------ */
+/* Typo tolerance                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Damerau-Levenshtein distance (optimal string alignment: insert, delete, substitute, or swap two
+ * adjacent letters, each costing 1). Stops early once every alignment costs more than `max`.
+ * @param {string} a
+ * @param {string} b
+ * @param {number} [max] cap; default Infinity
+ * @returns {number} the distance when ≤ max, else max + 1
+ */
+export function editDistance(a, b, max = Infinity) {
+  const s = String(a ?? '');
+  const t = String(b ?? '');
+  const cap = Number.isFinite(Number(max)) ? Math.max(0, Number(max)) : Infinity;
+  if (s === t) return 0;
+  const m = s.length;
+  const n = t.length;
+  if (Math.abs(m - n) > cap) return cap + 1;
+  if (!m || !n) return Math.max(m, n) > cap ? cap + 1 : Math.max(m, n);
+  let prev2 = null;
+  let prev = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    const cur = new Array(n + 1);
+    cur[0] = i;
+    let rowMin = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      let v = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      if (i > 1 && j > 1 && s[i - 1] === t[j - 2] && s[i - 2] === t[j - 1]) v = Math.min(v, prev2[j - 2] + 1);
+      cur[j] = v;
+      if (v < rowMin) rowMin = v;
+    }
+    // Every later cell costs at least the smallest cell of this row (a swap reaches back two rows, but
+    // that cell is never cheaper than the substitution path through this row), so stop here.
+    if (rowMin > cap) return cap + 1;
+    prev2 = prev;
+    prev = cur;
+  }
+  return prev[n] > cap ? cap + 1 : prev[n];
+}
+
+/**
+ * Typos forgiven in a (stemmed) query word of `len` letters: none up to 3 letters, 1 for 4–5, 2 for 6+.
+ * @param {number} len
+ * @returns {number}
+ */
+export function fuzzyLimit(len) {
+  const n = Number(len) || 0;
+  if (n <= 3) return 0;
+  return n <= 5 ? 1 : 2;
+}
+
+/** Fuzzy alternatives of query token t0 in a fuzzy map ({ token: [alternative tokens] }), or null. */
+function fuzzyAlts(fuzzy, t0) {
+  if (!fuzzy || typeof fuzzy !== 'object' || !Object.prototype.hasOwnProperty.call(fuzzy, t0)) return null;
+  const alts = fuzzy[t0];
+  return Array.isArray(alts) && alts.length ? alts : null;
+}
+
+/** Light plural stemming so "bananas" and "banana" (or "eggs"/"egg", "oats"/"oat") compare equal. */
 function stem(w) {
   if (w.length > 3 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
   if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') && !w.endsWith('us') && !w.endsWith('is')) return w.slice(0, -1);
@@ -447,16 +662,34 @@ function foodTokens(food) {
  *   food-pack foods (curated); +3 for library foods (id in localIds), +2 more for favorites, +1 more for recents.
  * - Partial match (some query tokens missed): the total is multiplied by 0.25, so a typo in one word
  *   still surfaces the food, well below full matches.
+ * - Fuzzy (only with opts.fuzzy, a map query token → alternative tokens, see fuzzyMap): a query token with
+ *   alternatives is swapped for the first one the food contains (a whole name token, else a whole brand token) and
+ *   the food is scored as if the query were spelt that way, minus 0.75 per swapped word.
+ *   Without a fuzzy map, scores are exactly as described above.
  * A matched food whose penalties take the total to ≤ 0 scores 0.01, so 0 always means "no match".
  * @param {string} query
  * @param {object} food
- * @param {{localIds?: Set<string>, favoriteIds?: Set<string>, recentIds?: Set<string>}} [opts]
+ * @param {{localIds?: Set<string>, favoriteIds?: Set<string>, recentIds?: Set<string>, fuzzy?: object|null}} [opts]
  * @returns {number}
  */
-export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new Set(), recentIds = new Set() } = {}) {
-  const q = queryTokens(query);
+export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new Set(), recentIds = new Set(), fuzzy = null } = {}) {
+  let q = queryTokens(query);
   if (!q.length || !food || typeof food !== 'object') return 0;
   const { name, brand, text } = foodTokens(food);
+  // Typo alternatives: a misspelt query word is swapped for the alternative this food actually contains (a whole
+  // name word first, else a brand word), and the food is then scored as if the query had been spelt that way,
+  // minus a small cost per corrected word. So "chiken brest" ranks foods in the same order as "chicken breast".
+  let corrected = 0;
+  if (fuzzy) {
+    q = q.map((t0) => {
+      const fz = fuzzyAlts(fuzzy, t0);
+      if (!fz) return t0;
+      const alt = fz.find((t) => name.includes(t)) || fz.find((t) => brand.includes(t));
+      if (!alt) return t0;
+      corrected++;
+      return alt;
+    });
+  }
   if (!q.some((t0) => text.includes(t0) || (SYNONYMS[t0] || []).some((t) => text.includes(t)))) return 0;
   let score = 0;
   let matched = 0;
@@ -505,6 +738,7 @@ export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new
   if (localIds.has(food.id)) score += 3;
   if (favoriteIds.has(food.id)) score += 2;
   if (recentIds.has(food.id)) score += 1;
+  score -= 0.75 * corrected;
   if (matched < q.length) score *= 0.25;
   return score > 0 ? score : 0.01;
 }
@@ -524,11 +758,12 @@ function dedupKey(food) {
  * sorted last, because live sources also match on fields we do not see. Never throws on odd input.
  * @param {string} query
  * @param {object[]} foods
- * @param {{limit?: number, localIds?: Set<string>, favoriteIds?: Set<string>, recentIds?: Set<string>}} [opts]
+ * @param {{limit?: number, localIds?: Set<string>, favoriteIds?: Set<string>, recentIds?: Set<string>, fuzzy?: object|null}} [opts]
+ *   fuzzy: typo alternatives passed through to scoreFood (fuzzyMap, or searchFoodsDetailed's `fuzzy`)
  * @returns {object[]} Foods, at most `limit`
  */
-export function rankFoods(query, foods, { limit = 40, localIds, favoriteIds, recentIds } = {}) {
-  const opts = { localIds: localIds || new Set(), favoriteIds: favoriteIds || new Set(), recentIds: recentIds || new Set() };
+export function rankFoods(query, foods, { limit = 40, localIds, favoriteIds, recentIds, fuzzy = null } = {}) {
+  const opts = { localIds: localIds || new Set(), favoriteIds: favoriteIds || new Set(), recentIds: recentIds || new Set(), fuzzy };
   const scored = (Array.isArray(foods) ? foods : [])
     .filter((f) => f && typeof f === 'object' && f.id)
     .map((food, i) => ({ food, i, score: scoreFood(query, food, opts) }))
@@ -550,6 +785,8 @@ export function rankFoods(query, foods, { limit = 40, localIds, favoriteIds, rec
 /**
  * Search the user's library and the built-in list synchronously (no network). Only matching foods
  * (score > 0) are returned, ranked by rankFoods with the library / favorite / recent boosts.
+ * Typos: when no result matches every query word, words that match no food at all get fuzzyMap
+ * alternatives and the list is scored again with them (exact matches still rank as before).
  * Never throws on odd input (empty or punctuation-only query → []).
  * @param {string} query
  * @param {{library?: object|object[], builtin?: object[], recents?: string[], favorites?: string[], limit?: number}} sources
@@ -566,8 +803,128 @@ export function searchLocal(query, { library = {}, builtin = [], recents = [], f
     recentIds: new Set(Array.isArray(recents) ? recents : [])
   };
   const pool = [...lib, ...(Array.isArray(builtin) ? builtin : [])]
-    .filter((f) => f && typeof f === 'object' && f.id && scoreFood(query, f, opts) > 0);
-  return rankFoods(query, pool, { ...opts, limit });
+    .filter((f) => f && typeof f === 'object' && f.id);
+  const exact = pool.filter((f) => scoreFood(query, f, opts) > 0);
+  const ranked = rankFoods(query, exact, { ...opts, limit });
+  // Typo fallback: only when no result matches every query word, and only for words that match nothing.
+  if (ranked.some((f) => fullyMatches(query, f))) return ranked;
+  const fuzzy = fuzzyMap(query, { library: lib, builtin });
+  if (!fuzzy) return ranked;
+  const fopts = { ...opts, fuzzy };
+  return rankFoods(query, pool.filter((f) => scoreFood(query, f, fopts) > 0), { ...fopts, limit });
+}
+
+/** Whether query token t0 matches a food's name/brand tokens by scoreFood's rules (synonyms and fuzzy alternatives included). */
+function tokenHits(t0, name, brand, fuzzy) {
+  const alts = [t0, ...(SYNONYMS[t0] || [])];
+  if (alts.some((t) => name.some((w) => w.includes(t)) || brand.some((w) => w.startsWith(t)))) return true;
+  const fz = fuzzy && fuzzyAlts(fuzzy, t0);
+  return !!fz && fz.some((t) => name.includes(t) || brand.includes(t));
+}
+
+/**
+ * Whether every query word matches the food under scoreFood's rules (whole word, prefix, brand prefix,
+ * substring of a name word, synonyms, and opts.fuzzy alternatives when given), i.e. scoreFood would not
+ * apply its partial-match factor.
+ * @param {string} query
+ * @param {object} food
+ * @param {{fuzzy?: object|null}} [opts]
+ * @returns {boolean}
+ */
+export function fullyMatches(query, food, { fuzzy = null } = {}) {
+  const q = queryTokens(query);
+  if (!q.length || !food || typeof food !== 'object') return false;
+  const { name, brand } = foodTokens(food);
+  return q.every((t0) => tokenHits(t0, name, brand, fuzzy));
+}
+
+/**
+ * Vocabulary of a food list: distinct name and brand tokens, and token → number of foods, bucketed by first
+ * letter (tokens with digits left out). Cached per array object: callers pass the same array until the list
+ * changes (food.js memoizes built-in + pack foods), so a new list means a new array and a fresh vocabulary.
+ */
+const vocabCache = new WeakMap();
+function vocabOf(foods, cache = true) {
+  let v = cache ? vocabCache.get(foods) : null;
+  if (v) return v;
+  // token → { n: foods containing it, last: index of the last food counted, name/brand: where it occurs }
+  const counts = new Map();
+  let i = 0;
+  for (const f of foods) {
+    i++;
+    if (!f || typeof f !== 'object' || !f.id) continue;
+    const t = foodTokens(f);
+    for (let k = 0; k < 2; k++) {
+      const list = k ? t.brand : t.name;
+      for (let j = 0; j < list.length; j++) {
+        const w = list[j];
+        let c = counts.get(w);
+        if (!c) counts.set(w, (c = { n: 0, last: 0, name: false, brand: false }));
+        if (c.last !== i) { c.n++; c.last = i; }
+        if (k) c.brand = true;
+        else c.name = true;
+      }
+    }
+  }
+  const names = new Set();
+  const brandList = [];
+  const byFirst = new Map();
+  for (const [w, c] of counts) {
+    if (c.name) names.add(w);
+    if (c.brand) brandList.push(w);
+    if (/\p{N}/u.test(w)) continue;
+    let bucket = byFirst.get(w[0]);
+    if (!bucket) byFirst.set(w[0], (bucket = []));
+    bucket.push([w, c.n]);
+  }
+  v = { names, nameList: [...names], brandList, byFirst };
+  if (cache) vocabCache.set(foods, v);
+  return v;
+}
+
+/** Whether token t (or a synonym) matches any food of a vocabulary by scoreFood's rules. */
+function vocabHits(v, t0) {
+  return [t0, ...(SYNONYMS[t0] || [])].some((t) =>
+    v.names.has(t) || v.nameList.some((w) => w.includes(t)) || v.brandList.some((w) => w.startsWith(t)));
+}
+
+/**
+ * Typo alternatives for a local search: for each query word (4+ letters, no digits) that matches no food
+ * in library + builtin at all, the closest name/brand tokens of those foods within fuzzyLimit (same first
+ * letter), closest first, then most common; at most 5 per word. Pass the result to scoreFood/rankFoods as
+ * opts.fuzzy. The built-in vocabulary is cached per `builtin` array (pass the same array while unchanged);
+ * the library's is rebuilt per call (it is small).
+ * @param {string} query
+ * @param {{library?: object|object[], builtin?: object[]}} sources as for searchLocal
+ * @returns {object|null} { queryToken: [alternative tokens] }, or null when no word needs (or has) one
+ */
+export function fuzzyMap(query, { library = {}, builtin = [] } = {}) {
+  const q = tokenize(query).filter((t) => fuzzyLimit(t.length) > 0 && !/\p{N}/u.test(t));
+  if (!q.length) return null;
+  const lib = (Array.isArray(library) ? library : Object.values(library || {}))
+    .filter((f) => f && typeof f === 'object' && f.id);
+  const vocabs = [vocabOf(lib, false)];
+  if (Array.isArray(builtin) && builtin.length) vocabs.push(vocabOf(builtin));
+  let out = null;
+  for (const t0 of new Set(q)) {
+    if (vocabs.some((v) => vocabHits(v, t0))) continue;
+    const limit = fuzzyLimit(t0.length);
+    const found = new Map(); // token → [distance, count]
+    for (const v of vocabs) {
+      for (const [w, n] of v.byFirst.get(t0[0]) || []) {
+        if (Math.abs(w.length - t0.length) > limit) continue;
+        const d = editDistance(t0, w, limit);
+        if (d > limit) continue;
+        const prev = found.get(w);
+        if (prev) prev[1] += n;
+        else found.set(w, [d, n]);
+      }
+    }
+    if (!found.size) continue;
+    const alts = [...found].sort((a, b) => a[1][0] - b[1][0] || b[1][1] - a[1][1]).slice(0, 5).map(([w]) => w);
+    (out || (out = {}))[t0] = alts;
+  }
+  return out;
 }
 
 /**

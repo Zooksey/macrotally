@@ -1,7 +1,7 @@
 // MacroTally — food modals: add-food search, food detail/amount, custom food editor, barcode scanner.
 import { state, uid, saveFood, deleteFood, addEntry, updateEntry, removeEntry, toggleFavorite } from '../store.js';
 import {
-  searchFoods, lookupBarcode, effectiveUsdaKey, searchLocal, rankFoods,
+  searchFoodsDetailed, lookupBarcode, effectiveUsdaKey, searchLocal, rankFoods, fullyMatches, fuzzyMap,
   nutrientsFor, unitOptions, buildEntry, makeCustomFood, nutritionLooksOff
 } from '../foods.js';
 import { aiConfigured, askAi, downscaleImage } from '../ai.js';
@@ -130,6 +130,15 @@ function rankOpts() {
   };
 }
 
+/** Built-in + pack foods as ONE array that keeps its identity until either list changes (searchLocal caches its typo vocabulary per array). */
+let poolMemo = { builtin: null, packs: null, list: [] };
+function builtinPool() {
+  const b = builtinFoods();
+  const p = packFoods();
+  if (b !== poolMemo.builtin || p !== poolMemo.packs) poolMemo = { builtin: b, packs: p, list: [...b, ...p] };
+  return poolMemo.list;
+}
+
 /** Instant, offline results: library + built-in list + food packs (or a library barcode match for a typed barcode). */
 function localResults(q) {
   if (isBarcodeQuery(q)) {
@@ -138,11 +147,36 @@ function localResults(q) {
   }
   return searchLocal(q, {
     library: state.foods,
-    builtin: [...builtinFoods(), ...packFoods()],
+    builtin: builtinPool(),
     recents: state.recents,
     favorites: state.favorites,
     limit: 25
   });
+}
+
+/**
+ * Typo alternatives to rank merged local + online results with: the local ones (when no local result matches
+ * every word, as in searchLocal) plus the online search's spelling correction. null when there are none.
+ */
+function mergedFuzzy(q, local, netFuzzy) {
+  let out = null;
+  const add = (map) => {
+    for (const [tok, alts] of Object.entries(map || {})) {
+      if (!out) out = {};
+      out[tok] = [...new Set([...(out[tok] || []), ...alts])];
+    }
+  };
+  if (!isBarcodeQuery(q) && !local.some((f) => fullyMatches(q, f))) add(fuzzyMap(q, { library: state.foods, builtin: builtinPool() }));
+  add(netFuzzy);
+  return out;
+}
+
+/** Note under the list when one source failed but the search still found foods. */
+function sourceNote(failed) {
+  if (!Array.isArray(failed) || failed.length !== 1) return '';
+  return failed[0] === 'off'
+    ? 'Open Food Facts is busy right now; showing USDA results.'
+    : 'USDA FoodData Central could not be reached right now; showing Open Food Facts results.';
 }
 
 /**
@@ -231,8 +265,11 @@ function renderSearch(sheet) {
   const st = sheet._search;
   if (!box || !st) return;
   const local = localResults(st.q);
-  const foods = st.api ? rankFoods(st.q, [...local, ...st.api], { ...rankOpts(), limit: 40 }) : local;
+  const foods = st.api
+    ? rankFoods(st.q, [...local, ...st.api], { ...rankOpts(), limit: 40, fuzzy: mergedFuzzy(st.q, local, st.fuzzy) })
+    : local;
   let html = '';
+  if (st.corrected) html += `<p class="search-note muted small">Showing results for "${esc(st.corrected)}"</p>`;
   if (foods.length) {
     html += `<h3 class="list-head">Results</h3><div class="list">${foods.map((f) => foodRow(f, resultTag(f))).join('')}</div>`;
   }
@@ -244,6 +281,8 @@ function renderSearch(sheet) {
       : `<p class="inline-error">${esc(st.error)}</p>`;
   } else if (st.api && !foods.length) {
     html += '<p class="empty muted small">No matches. Try fewer words, or create a custom food.</p>';
+  } else if (st.note) {
+    html += `<p class="search-note muted small">${esc(st.note)}</p>`;
   }
   box.innerHTML = html;
   box.hidden = false;
@@ -263,21 +302,34 @@ function hideResults(sheet) {
 
 async function runSearch(sheet, q, seq) {
   const usdaKey = effectiveUsdaKey(state.profile);
+  const current = () => seq === searchSeq && sheet.isConnected && sheet._search;
   let api = null;
   let error = '';
+  let extra = {};
   try {
     if (isBarcodeQuery(q)) {
       // A typed barcode: the product endpoint (with the USDA Branded fallback) beats text search.
       const found = localByBarcode(q) || await lookupBarcode(q, { usdaKey });
       api = found ? [found] : [];
     } else {
-      api = await searchFoods(q, { usdaKey, region: state.profile.region || 'world' });
+      const r = await searchFoodsDetailed(q, {
+        usdaKey,
+        region: state.profile.region || 'world',
+        // The faster source (usually USDA) shows at once; the spinner stays until the other answers.
+        onPartial: (foods) => {
+          if (!current()) return;
+          sheet._search = { ...sheet._search, api: foods, loading: true };
+          renderSearch(sheet);
+        }
+      });
+      api = r.foods;
+      extra = { note: api.length ? sourceNote(r.failed) : '', corrected: (r.corrected && r.correctedQuery) || '', fuzzy: r.fuzzy };
     }
   } catch (err) {
     error = (err && err.message) || 'Search failed. Try again.';
   }
-  if (seq !== searchSeq || !sheet.isConnected || !sheet._search) return;
-  sheet._search = { q, seq, api: api || [], loading: false, error };
+  if (!current()) return;
+  sheet._search = { q, seq, api: api || [], loading: false, error, note: '', corrected: '', fuzzy: null, ...extra };
   renderSearch(sheet);
 }
 
