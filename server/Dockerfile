@@ -7,13 +7,15 @@ RUN apt-get update \
 
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 
-RUN useradd --create-home --home-dir /home/app --shell /usr/sbin/nologin app
+# The base image already has user "node" (uid 1000), so "app" gets uid/gid 1001.
+RUN useradd --create-home --home-dir /home/app --shell /usr/sbin/nologin app \
+  && mkdir -p /data && chown app:app /data
 ENV HOME=/home/app
 
 WORKDIR /app
-COPY ai-server.mjs schema.json system.txt ./
+COPY ai-server.mjs off-pack.mjs schema.json system.txt ./
 
-ENV DISABLE_AUTOUPDATER=1 PORT=8787
+ENV DISABLE_AUTOUPDATER=1 PORT=8787 DATA_DIR=/data
 EXPOSE 8787
 USER app
 CMD ["node", "ai-server.mjs"]

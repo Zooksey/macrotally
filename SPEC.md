@@ -1,6 +1,6 @@
 # MacroTally — architecture & module spec
 
-A free, account-less replacement for MacroFactor. Static progressive web app (PWA): plain HTML/CSS/JS ES modules, **no build step, no framework, no backend**. Hosted on GitHub Pages (or any static host). All user data lives in the browser's `localStorage` on the user's device. Food lookups go directly from the device to public APIs (Open Food Facts, optional USDA FoodData Central).
+A free, account-less replacement for MacroFactor. Static progressive web app (PWA): plain HTML/CSS/JS ES modules, **no build step, no framework, no backend**. Hosted on GitHub Pages (or any static host). All user data lives in the browser's `localStorage` on the user's device. Food lookups go from the device to public APIs (Open Food Facts, optional USDA FoodData Central); Open Food Facts *text* search goes through the AI helper's public search relay first (see js/foods.js), because OFF's legacy search fails most requests.
 
 Must work on **iOS Safari (home-screen PWA)** and **Android Chrome**. Mobile-first UI, dark mode via `prefers-color-scheme`. Everything must work when served from a sub-path (e.g. `https://user.github.io/macrotally/`), so **all URLs are relative** (`./js/app.js`, `./sw.js`, never `/js/...`).
 
@@ -77,12 +77,21 @@ export function fmtWeight(kg: number, units, digits = 1): string   // "182.4 lb"
 
 // Diary / foods / weights helpers (all call save())
 export function getDay(date): { entries: Entry[] }  // creates if missing (does NOT save on create)
-export function addEntry(date, entry: Entry): void  // push + touchRecent(entry.foodId) + save
+export function addEntry(date, entry: Entry): void  // push + touchRecent(entry.foodId) + brand tracking (below) + save
+// Brands you use (v1.8): addEntry looks the food up in state.foods[entry.foodId]; when isPackagedProduct(food)
+// (source 'off'|'usda', or any barcode, or a `kind:'products'` pack food with product: true; NOT restaurant-pack
+// items, built-in foods or brandless/barcode-less custom foods) and its brand (first of a comma list) is non-empty
+// and not in state.brandsOff: state.brands[brandKey(brand)] → n + 1, last = date, name = the nicest casing seen
+// (mixed case > ALL CAPS > lowercase). Listeners (onBrandsChange) run after a change (js/brandpack.js syncs).
+export function brandKey(name): string              // lowercase, trimmed, apostrophes removed, non-letters/digits → one space
+export function isPackagedProduct(food): boolean
+export function removeBrand(key): boolean           // delete state.brands[key], add key to state.brandsOff (never re-added), save
+export function onBrandsChange(fn): () => void      // subscribe; returns unsubscribe
 export function updateEntry(date, entryId, patch): void
 export function removeEntry(date, entryId): void
 export function touchRecent(foodId): void           // move to front, max 40
 export function toggleFavorite(foodId): boolean     // returns new favorite status
-export function saveFood(food: Food): void          // state.foods[food.id] = food; save
+export function saveFood(food: Food): void          // state.foods[food.id] = food (a copy without `_partial`); save
 export function deleteFood(foodId): void
 export function addWeight(date, kg): void           // replace same-date entry, keep sorted asc by date
 export function removeWeight(date): void
@@ -117,11 +126,18 @@ State shape:
   recents: [foodId],                                // most recent first
   favorites: [foodId],
   meals: ['Breakfast','Lunch','Dinner','Snacks'],
-  feed: { gistId:'', lastSync:null|string, lastCount:0, lastError:null|string, imported:{ [date]: kg } }
+  feed: { gistId:'', lastSync:null|string, lastCount:0, lastError:null|string, imported:{ [date]: kg } },
   // weight feed (deep-merged like profile/goal; backups carry it): gistId = secret gist id ('' = off);
   // lastSync = ISO datetime of the last successful fetch; lastCount = weigh-ins added/updated by it;
   // lastError = message of the last failed sync; imported = weigh-ins the feed wrote, so a later feed value may
   // update them but never a typed one; pruned to the last 400 days (see js/feed.js)
+  brands: { [brandKey]: { name:string, n:number, last:'YYYY-MM-DD'|null } },  // brands of logged packaged products (backups carry it)
+  brandsOff: [brandKey],                            // brands the user removed: never tracked again
+  brandSync: { sent:'', sentAt:null|string, packCheckedAt:null|string }
+  // this device's helper bookkeeping (deep-merged; kept from the device when a backup is imported): sent = JSON of
+  // the brand list last PUT successfully; packCheckedAt = last brand-pack request that got an HTTP answer.
+  // merge() repairs brands (drops malformed records, re-keys, merges duplicates), brandsOff (strings), and strips
+  // `_partial` from state.foods.
 }
 ```
 
@@ -265,10 +281,14 @@ export async function searchFoods(query: string, opts = {}): Promise<Food[]>
  *  word, so a typo ranks foods in the same order as the correct spelling; without a fuzzy map scores are unchanged. */
 export function editDistance(a: string, b: string, max = Infinity): number
 /** v1.7.3: stem() also maps a trailing "-ie" to "y" (krispie/krispies, cookie/cookies share a stem). The OFF text
- *  search retries twice. brandAlias(query): brands typed by sound are rewritten before the online search
+ *  search retried twice (v1.8: once again, after the relay; see "Search relay" below). brandAlias(query): brands typed by sound are rewritten before the online search
  *  ("rice crispy|crispie(s)|krispy" → "rice krispies", "cheese its" → "cheez it", "fruit loops" → "froot loops",
  *  "captain crunch" → "cap'n crunch"); searchFoodsDetailed then searches the rewritten query and returns it as
  *  corrected / correctedQuery with a fuzzy map (original token → the brand's tokens). */
+/** v1.8: rankFoods / searchLocal option `plainFirst` (the Add food sheet passes true): after the user's own foods, up
+ *  to three built-in foods that match every query word and whose FIRST name word is a query word ("Rice, white, …")
+ *  are moved up and alternated with the best other results, chosen by score + stapleScore (everyday forms such as
+ *  raw / whole / cooked preferred over dried / powder / flour …). Brand searches have no such built-in and are unchanged. */
 export function brandAlias(query: string): { query: string, brand: string, fuzzy: object } | null
 export function fuzzyLimit(len: number): number
 export function fuzzyMap(query: string, { library, builtin }): { [token]: string[] } | null
@@ -286,6 +306,27 @@ export function nutritionLooksOff(food: Food): string|null
 ```
 
 Errors from `fetch` should surface as thrown `Error` with a friendly message ("No internet connection?" on TypeError).
+
+**Search relay (v1.8).** `searchFoodsDetailed(query, { ..., relayUrl })` (callers pass `aiUrl(state)`; blank = skip):
+the OFF text search first calls `GET {relayUrl}/v1/search?q=<text>&region=<code>` with no Authorization, a 6 s
+timeout and no retry. 200 → `{ products: [...OFF-shaped, partial: true], source, cached }`, mapped through
+`foodFromOFF` (no serving sizes → per-100 g foods without servings) with `_partial: true`. On ANY failure (network,
+non-200, unreadable JSON, no `products` array) the legacy `cgi/search.pl` runs, retried once (429/503/network).
+A relay that answers 401/404 (a helper without the relay) is skipped for 10 minutes (per relay address, per session).
+The second chance's corrected OFF search goes relay-first too; the session cache key includes whether a relay was
+given. Opening a `_partial` result (modals/food.js `pick-food`): the library's or a pack's food with that barcode
+(`localByBarcode`, no request), else `lookupBarcode` (OFF product endpoint, which has servings) raced against ~4 s,
+the row showing a spinner; on success the full food opens, else the partial one. `saveFood` never stores `_partial`.
+
+**Ranking of product packs (v1.8).** Restaurant-pack and built-in foods keep the flat +2 curated bonus with no
+unmatched-word cost. Foods from a `kind:'products'` pack (`product: true`) get +2 but pay the live results'
+−0.5 per unmatched name word capped at −1.5 (real branded products whose names carry flavour/size words: they rank
+with the curated data and are not buried, yet "chicken breast" still beats "chicken breast bites"); the library's
++3 keeps the user's own foods above an equally matching product. `rankFoods` de-duplicates copies of one barcode by
+preference: the library copy (id in localIds, never `_partial`) > a pack / built-in copy > a full live copy > a
+`_partial` live copy, placed where the best-scored copy ranked. The add-food sheet also swaps a live result whose
+id is in the library for the library copy. `warmSearchVocabulary(list)` builds the typo vocabulary ahead of time
+(the sheet calls it when idle after the first local results).
 
 ---
 
@@ -412,10 +453,10 @@ Keyboard: `ui.js` listens to `visualViewport` resize/scroll and sets `--vv-top`,
 **Settings** (`views/settings.js`, export `settingsView()`): nothing on the page is editable; it lists grouped rows (`.card` with `h2` + `.list` of `button.row` `data-action="open-setting" data-setting="<kind>"`, title, one-line `.row-sub` with the current value, chevron), each opening its own sheet from `modals/settings.js` (`openSetting(kind)`; title + close X; edits happen only there, and form fields are stored only by the sheet's Save button).
 - **How to use the app** (first group): one row per help topic (`button.row` `data-action="open-help" data-topic="<id>"`, title + one-line subtitle, chevron) from `HELP_TOPICS` in `modals/help.js` (ids `start`, `logging`, `scanning`, `ai`, `fixing`, `weight`, `plan`, `data`; each `{ id, title, sub, body }` with `body()` returning HTML). `openHelp(id)` opens the topic in a sheet (`cls: 'setting-sheet help-sheet'`, same title + close X header via `sheetHead`); the module registers the `open-help` action. The text is plain-language instructions using the app's own button labels; a few lines follow state (meal names, units, whether the AI helper and Google Drive backup are set up). Styles: `.help-sheet` in css/app.css.
 - **You**: Profile ("Brian · Male · born 1985 · 5 ft 10 in · Imperial") → sheet "Update profile": name (optional), sex, birth year, height (cm, or ft+in when imperial), units, activity select, "Save profile", "Run setup again". Meals ("Breakfast, Lunch, Dinner, Snacks") → editable comma list, "Save meals".
-- **Food**: Food sources ("Region: United States · shared USDA key") → search region, USDA API key input + link to https://fdc.nal.usda.gov/api-key-signup (free), note that Open Food Facts is always on. Food packs ("12 of 36 on") → per-pack on/off switches, Remove for imported packs, "Import food pack".
+- **Food**: Food sources ("Region: United States · shared USDA key") → search region, USDA API key input + link to https://fdc.nal.usda.gov/api-key-signup (free), note that Open Food Facts is always on. Food packs ("12 of 36 on") → per-pack on/off switches (bundled packs incl. Popular products (US), the helper's "Brands you use" pack marked "from your AI helper", imported packs), Remove for imported packs only, "Import food pack". Brands you use ("14 brands · 3,420 products" / "Needs the AI helper") → sheet: without the helper one muted sentence; with it a status line ("14 brands · 3,420 products · updated 2 days ago" from the stored pack's `generated` and food count, or "No pack yet. It is built on the helper within a day of logging a branded product."), the tracked brands by log count with × each (`data-action="remove-brand"`, confirmDialog → `removeBrand`), "Check for a new pack" (`brand-pack-check`: syncBrands, then refreshBrandPack({ force: true }), toast) and a privacy hint.
 - **Sync**: Google Drive backup ("Not set up" / "Not connected" / "Connected as … · last backup 5 min ago"), Weight feed ("Off" / "Last sync 5 min ago · N weigh-ins" / "Sync failed" / "Not synced yet"), AI helper ("Not set up" / "On · last answer …"). Weight feed sheet: form `data-submit="save-feed"` with a "Gist id" input (accepts a pasted gist URL, keeps the id via `parseGistId`; an unrecognisable value → error toast; blank switches the feed off and keeps `imported`; a changed id clears lastSync/lastCount/lastError). Save → toast "Weight feed saved", close the sheet, `syncWeightFeed({ force: true })`. When an id is set: status line `Last sync 5 min ago · N weigh-ins`, `Sync failed: <lastError>` (class `warn`) or `Not synced yet`, and a ghost "Sync now" button (`data-action="feed-sync"`, forced sync, toast "No new weigh-ins" when nothing changed). Hint points to the README Shortcut recipe.
 - **Data**: Backup ("Export, import or erase") → "Export backup" (Blob download `macrotally-backup-YYYY-MM-DD.json`), "Import backup" (file input, `data-change="import-file"`, confirm before replace), "Erase all data" (confirmDialog danger). Install (only when not running standalone) → "Install app" button if `window.__installPrompt`, else iOS/Android add-to-home-screen instructions.
-- **About** card (on the page): short text, privacy note (no server, data on this device only), version, Check for updates / Reload to update.
+- **About** card (on the page): short text, privacy note (no account, data on this device only; searches pass through the helper's search relay; with the AI helper set up, AI add content and logged brand names go to the user's own helper), version, Check for updates / Reload to update.
 - Successful saves close their sheet and re-render the page so the row's subtitle updates; validation errors keep the sheet open. Actions that change what an open sheet shows (Drive, Sync now, Test, pack switches/import/remove, install) also call `refreshSettingSheets()`, which rebuilds open setting sheets in place.
 
 ## Modals (UI)
@@ -443,6 +484,19 @@ System font stack. Body padding-bottom for tab bar + `env(safe-area-inset-bottom
 - `index.html` (UI): meta viewport with `viewport-fit=cover`, theme-color, apple-mobile-web-app-capable, apple-mobile-web-app-status-bar-style black-translucent, apple-touch-icon → `./icons/icon-192.png`, link manifest, `<div id="app"></div><nav id="tabbar"></nav><div id="modal-root"></div><div id="toast-root"></div>`, `<script type="module" src="./js/app.js">`.
 - `sw.js`: `const VERSION = 'v1'`; precache the app shell (index.html, css, all js, manifest, icons) on install; on activate delete old caches + `clients.claim()`; fetch: shell files (and navigations) → cache-first from this version's precache, so one load never mixes versions and a reload right after a deploy is not fed old files by the browser's HTTP cache (GitHub Pages sends max-age=600; the precache fetches with `cache: 'reload'` for the same reason, and the registration uses `updateViaCache: 'none'`); other same-origin GETs → network-first falling back to cache; cross-origin → network only (do not cache API calls, including the weight feed's api.github.com gist reads). Navigation requests fall back to cached `./index.html`. The SHELL list includes every module, `./js/feed.js` among them.
 - `tools/make_icons.py`: stdlib-only PNG writer producing 192 and 512 px icons: dark-green (#2e7d5b) rounded square with a white ring (like a macro ring) and a filled accent arc; also write `icons/icon.svg` equivalent. Run it once and commit the PNGs.
+
+## Brands you use (js/brandpack.js, optional, needs the AI helper)
+
+- Sync: when `aiConfigured(state)` and `JSON.stringify(brandPayload())` (state.brands sorted by n, then last, top 300,
+  `{ name, n }` only) differs from `state.brandSync.sent`: `PUT {aiUrl}/v1/brands` (Bearer) `{ brands }` → on 2xx
+  record `sent`/`sentAt`. Debounced 5 s after each change (`onBrandsChange`) and once at start-up; failures silent.
+- Pack: `GET {aiUrl}/v1/brand-pack` (Bearer, `If-None-Match` with the stored ETag, `cache: 'no-store'`) at most once
+  per 20 h (`state.brandSync.packCheckedAt`, set on any HTTP answer) and on demand. 200 → validated as
+  `macrotally-pack/1` with id `my-brands`, stored as text + ETag in Cache Storage `macrotally-data` (key
+  `https://macrotally.invalid/data/brand-pack.json`; memory only without the Cache API; never localStorage) and
+  handed to `setRemotePack('my-brands', obj)` in js/packs.js (listed with `remote: true`, switchable, no Remove).
+  304 / 404 / 503 / network errors: no-ops. Start-up loads the stored copy with no network. sw.js never deletes
+  the `macrotally-data` cache; "Erase all data" clears it (`clearBrandPack`).
 
 ## AI add (optional helper server)
 

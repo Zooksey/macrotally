@@ -5,7 +5,8 @@ import { REGIONS } from '../foods.js';
 import { esc, fmt, icon, on, toast, requestRender } from '../ui.js';
 import { listPacks, packsLoaded } from '../packs.js';
 import { driveConfigured, loadGIS } from '../drive.js';
-import { aiConfigured } from '../ai.js';
+import { aiConfigured, aiUrl } from '../ai.js';
+import { brandPackInfo } from '../brandpack.js';
 import { APP_VERSION, checkForUpdate, updateAvailable } from '../update.js';
 import { openSetting, cmToFtIn, plural, relativeTime, isStandalone, ensurePacksLoaded } from '../modals/settings.js';
 import { HELP_TOPICS } from '../modals/help.js'; // also registers the 'open-help' action
@@ -77,6 +78,13 @@ function packsSub() {
   return `${fmt(packs.filter((pk) => pk.enabled).length)} of ${fmt(packs.length)} on`;
 }
 
+function brandsSub() {
+  if (!aiConfigured(state)) return 'Needs the AI helper';
+  const n = Object.keys(state.brands || {}).length;
+  const info = brandPackInfo();
+  return `${plural(n, 'brand')} · ${info ? plural(info.count, 'product') : 'no pack yet'}`;
+}
+
 function driveSub() {
   if (!driveConfigured()) return 'Not set up';
   // Warm up Google sign-in so the popup can open straight from the button tap in the sheet.
@@ -119,7 +127,8 @@ export function settingsView() {
     ])}
     ${group('Food', [
       row('sources', 'Food sources', sourcesSub()),
-      row('packs', 'Food packs', packsSub())
+      row('packs', 'Food packs', packsSub()),
+      row('brands', 'Brands you use', brandsSub())
     ])}
     ${group('Sync', [
       row('drive', 'Google Drive backup', driveSub()),
@@ -131,7 +140,7 @@ export function settingsView() {
     <section class="card about">
       <h2>About</h2>
       <p class="small">MacroTally is a free, open macro tracker: barcode scanning, trend weight and an adaptive expenditure estimate.</p>
-      <p class="small"><strong>Privacy:</strong> there is no server and no account. Everything you log stays on this device${driveConfigured() ? ' (plus your own Google Drive if you connect it)' : ''}. Food searches go directly to Open Food Facts and USDA FoodData Central.${aiConfigured(state) ? ' AI add sends what you type and photograph to your own AI helper, which passes it to Claude.' : ''}</p>
+      <p class="small"><strong>Privacy:</strong> there is no account. Everything you log stays on this device${driveConfigured() ? ' (plus your own Google Drive if you connect it)' : ''}. Food searches go to Open Food Facts through the search relay of the AI helper at ${esc(aiUrl(state).replace(/^https?:\/\//, ''))} (directly to Open Food Facts when it can't be reached) and to USDA FoodData Central; only the words you search for are sent.${aiConfigured(state) ? ' AI add sends what you type and photograph to your own AI helper, which passes it to Claude. Brand names you log are sent to your own helper so it can bundle their products.' : ''}</p>
       <p class="muted small">Version ${esc(APP_VERSION)} · Food data © Open Food Facts contributors (ODbL) and USDA FoodData Central</p>
       ${updateAvailable()
         ? '<button type="button" class="btn btn-primary btn-block" data-action="app-update">Reload to update</button>'

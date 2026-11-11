@@ -11,7 +11,7 @@ A free, account-less macro tracker you host yourself and run on your phone. It r
 - **Adaptive expenditure**: your maintenance calories are estimated weekly from what you actually ate versus how your trend weight moved, and your calorie target follows it. This is the MacroFactor "algorithm", done in the open.
 - **Backup / restore** as a JSON file, plus an optional automatic daily backup to each user's own Google Drive. Installable as a home-screen app that works offline for everything except new food lookups.
 
-There is no server, no login and no analytics. Everyone who opens the link gets their own copy; their diary, weights and goals are stored only in their own browser on their own phone.
+There is no login and no analytics, and nothing you log is kept on a server. Everyone who opens the link gets their own copy; their diary, weights and goals are stored only in their own browser on their own phone. (Food text searches pass through the AI helper's search relay on their way to Open Food Facts; see Food data.)
 
 ## Hosting it for free (GitHub Pages)
 
@@ -68,7 +68,9 @@ Then open `http://localhost:8080/`. `localhost` counts as secure, so the camera 
 
 ## Food data
 
-- [Open Food Facts](https://world.openfoodfacts.org) is always on and needs no key. Coverage of packaged foods is good but not perfect, and some entries have incomplete nutrition. If a scan is not found you can create the food once and it is remembered by barcode. Text search is limited by Open Food Facts to roughly 10 searches a minute per phone, so the app waits for you to stop typing before searching and remembers results you already fetched. Set your **Search region** in Settings so results are ranked by what is popular in your country. When Open Food Facts is busy the app retries once and shows USDA results in the meantime. Small typos are forgiven ("bananna", "chiken breast"), and with USDA on, a misspelt brand gets one corrected search (shown as "Showing results for …").
+- [Open Food Facts](https://world.openfoodfacts.org) is always on and needs no key. Coverage of packaged foods is good but not perfect, and some entries have incomplete nutrition. If a scan is not found you can create the food once and it is remembered by barcode. Open Food Facts' own text search fails often, so text searches go through the **search relay** of the AI helper (`GET <helper>/v1/search`, the built-in address unless you set your own; no secret needed, only the words you search for are sent), which asks Open Food Facts' newer search service. When the relay cannot be reached (or is an older helper without it) the app falls back to the old Open Food Facts search, retried once. Relay results carry no serving sizes, so tapping one first fetches the full product by barcode (a second or two, shown as a spinner on the row); if that takes more than about 4 seconds the food opens per 100 g. The app waits for you to stop typing before searching and remembers results you already fetched. Set your **Search region** in Settings so results are ranked by what is popular in your country. When Open Food Facts is busy the app shows USDA results in the meantime. Small typos are forgiven ("bananna", "chiken breast"), and with USDA on, a misspelt brand gets one corrected search (shown as "Showing results for …").
+- **Popular products (US)** (`data/packs/off-popular-us.json`) is a built-in pack of about 12,000 of the most-scanned US products from Open Food Facts, with their barcodes. They are searched instantly with the rest of the offline list, and scanning one works without a connection. Switch it off in **Settings → Food packs** if you do not want it.
+- **Brands you use** (with the AI helper set up): the brands of the packaged foods you log (scanned, searched or from a products pack; not restaurant items, built-in foods or your own foods without a barcode) are counted on the phone and sent to your own helper (`PUT /v1/brands`: the brand names and how often you logged them, top 300). The helper builds a pack of those brands' products, which the app downloads at most once a day (`GET /v1/brand-pack`, only when it changed) and keeps in the browser's Cache Storage, not in your saved data. It shows in **Settings → Food packs** as **Brands you use** with its own switch; **Settings → Brands you use** lists the tracked brands with how often you logged them, removes one with ×, and has **Check for a new pack**.
 - [USDA FoodData Central](https://fdc.nal.usda.gov/) adds whole foods and US branded items. Get a free API key at https://fdc.nal.usda.gov/api-key-signup and paste it into Settings.
 
 ## Built-in food list
@@ -83,7 +85,7 @@ PowerShell: `$env:USDA_API_KEY='...'; node tools/build_foods.mjs`. Add `--dry` t
 
 ## Restaurant food packs
 
-A food pack is a restaurant menu as a JSON file. Its items are searched instantly alongside the built-in list, work offline and are logged per serving ("1 burrito"), since chains publish nutrition per item rather than per 100 g. Searching for the chain name finds them too, for example "taco bell burrito". The app ships with packs for Taco Bell, Applebee's, Arby's, Buffalo Wild Wings, Burger King, Chick-fil-A, Chili's, Chipotle, Cracker Barrel, Culver's, Dairy Queen, Domino's, Dunkin', Five Guys, IHOP, In-N-Out, Jack in the Box, Jersey Mike's, Jimmy John's, KFC, Little Caesars, McDonald's, Olive Garden, Panda Express, Panera Bread, Papa John's, Pizza Hut, Popeyes, Raising Cane's, Shake Shack, Sonic, Starbucks, Subway, Texas Roadhouse, Wendy's, Whataburger, Wingstop and Zaxby's (in `data/packs/`); the built-in packs are the files listed in `data/packs/index.json`.
+A food pack is a restaurant menu (or, with `"kind": "products"`, a list of packaged products such as the built-in **Popular products (US)** pack) as a JSON file. Its items are searched instantly alongside the built-in list, work offline and are logged per serving ("1 burrito"), since chains publish nutrition per item rather than per 100 g. Searching for the chain name finds them too, for example "taco bell burrito". The app ships with packs for Taco Bell, Applebee's, Arby's, Buffalo Wild Wings, Burger King, Chick-fil-A, Chili's, Chipotle, Cracker Barrel, Culver's, Dairy Queen, Domino's, Dunkin', Five Guys, IHOP, In-N-Out, Jack in the Box, Jersey Mike's, Jimmy John's, KFC, Little Caesars, McDonald's, Olive Garden, Panda Express, Panera Bread, Papa John's, Pizza Hut, Popeyes, Raising Cane's, Shake Shack, Sonic, Starbucks, Subway, Texas Roadhouse, Wendy's, Whataburger, Wingstop and Zaxby's (in `data/packs/`); the built-in packs are the files listed in `data/packs/index.json`.
 
 ### Building a pack
 
@@ -103,7 +105,7 @@ node tools/build_pack.mjs --nutritionix starbucks --name "Starbucks" --drop '\b(
 
 This writes `data/packs/<slug>.json`. Options: `--brand "..."` (defaults to the name; it is shown on every item and is searchable), `--out <file>` to write somewhere else, `--skip "Section A,Section B"` to leave whole menu sections out (exact section names as shown on the page, any letter case, separated by commas; a name that itself contains commas can be written as is, and the skipped names are recorded in the pack as `skipped`), `--drop "<regex>"` to leave out items whose name matches a JavaScript regular expression (any letter case; can be given more than once, and the expressions are recorded in the pack as `dropped`), `--dry` to print the item counts per menu section and the first 10 items without writing anything, and `--from <file.html>` to parse a copy of the menu page saved from your browser instead of downloading it (useful if the site refuses the request). Each item gets a serving label guessed from its name and section ("1 taco", "1 order", "1 drink (20 oz)", otherwise "1 serving").
 
-To ship a new pack with the app, add its file name to `data/packs/index.json` and to the `SHELL` list in `sw.js`, then bump `VERSION`.
+To ship a new pack with the app, add its file name to `data/packs/index.json` and to the `SHELL` list in `sw.js`, then bump `VERSION`. The popular-products pack `data/packs/off-popular-us.json` is generated from Open Food Facts data by `tools/build_off_pack.mjs` (see that file).
 
 ### Importing a personal pack
 
@@ -128,6 +130,8 @@ You do not have to host a pack to use it: in **Settings → Food packs**, tap **
 - `format` must be exactly `macrotally-pack/1`. `id` is a short lowercase name (`a-z`, `0-9`, `-`), `name` is shown in Settings and `brand` is attached to every item. `source`, `generated` and the optional `skipped` (menu sections left out by `--skip`) are for information only.
 - Each food has an `id` that is unique within the pack, a name `n`, an optional menu section `cat`, a serving `s` = `[label, grams]` and the nutrients `v` = `[kcal, protein g, carbs g, fat g, fiber g]` for one serving.
 - Use `null` for the grams when the serving weight is unknown (the usual case for restaurants); the item is then logged by the serving only. With a weight, the item can also be logged in grams or ounces.
+- Optional per food: `b`, the brand of that food (it replaces the pack's `brand`; `""` means no brand), and `bc`, its barcode (digits). A food with a barcode is found by a scan or a typed barcode, after your own foods, even offline.
+- Optional for the whole pack: `"kind": "products"` marks a pack of packaged products (store-bought items rather than a menu). Their grams are always given: `s` is the product's serving, e.g. `["1 cup (39 g)", 39]`, or `["100 g", 100]` when no serving is known (the item is then logged in grams), and `v` is for that serving. Products rank like the built-in list in search (below your own foods), and logging one counts its brand for **Brands you use**.
 - Items with a missing `id` or name, or without at least four non-negative numbers in `v`, are skipped. A file with no valid items is rejected.
 
 ## Google Drive backup (optional, for the app owner)
@@ -224,7 +228,7 @@ Untick anything you do not want, then tap **Add N to <meal>**. New foods are sav
 
 **Add via photo(s)** (the button under **Scan barcode** in the add-food sheet) is the packaged-food shortcut: snap the barcode, the Nutrition Facts panel and the front of the pack (one photo is enough), then tap **Find food**. The barcode is read from the photos on the phone. A barcode already in your foods opens that food; a lone barcode photo is looked up in Open Food Facts / USDA; otherwise all the photos go to Claude, which returns the food from the label with the barcode attached, so later scans find it. Without the AI helper it still works for the barcode alone. It uses the phone's own camera app, so it never asks for camera permission.
 
-What you type and photograph goes to your helper server and from there to Claude; nothing else from the app is sent. To turn it off, clear both fields in Settings and save.
+What you type and photograph goes to your helper server and from there to Claude. With the helper set up, the brand names you log (and how often) are sent to it too, so it can bundle their products into the **Brands you use** pack (see Food data). Search words go to the helper's search relay whether or not a secret is set. Nothing else from the app is sent. To turn it off, clear both fields in Settings and save.
 
 ## Layout
 
@@ -234,7 +238,9 @@ css/app.css           styles, light and dark
 js/config.js          app owner settings (Google client ID for Drive backup)
 js/store.js           state and localStorage persistence
 js/calc.js            trend weight, expenditure, targets
-js/foods.js           Open Food Facts / USDA lookup, portion scaling
+js/foods.js           Open Food Facts (via the helper's search relay) / USDA lookup, ranking, portion scaling
+js/packs.js           food packs (restaurant menus, packaged products)
+js/brandpack.js       optional "Brands you use": brand sync and the helper's brand pack
 js/scanner.js         camera barcode scanning
 js/charts.js          inline SVG charts
 js/drive.js           optional Google Drive backup (Google sign-in + Drive API)
@@ -245,7 +251,7 @@ js/views/*.js         Diary, Weight, Plan, Settings screens
 js/modals/*.js        add food, food detail, custom food, scanner, setup wizard, AI add
 sw.js                 service worker (offline app shell)
 server/               the optional AI helper service (Node + Claude Code CLI, Docker); see server/README.md
-tools/                icon generator and unit tests (`node tools/test_calc.mjs`, `node tools/test_feed.mjs`, `node tools/test_ai.mjs`, `node tools/test_ai_server.mjs`, `node tools/test_search.mjs`)
+tools/                icon generator and unit tests (`node tools/test_calc.mjs`, `node tools/test_feed.mjs`, `node tools/test_ai.mjs`, `node tools/test_ai_server.mjs`, `node tools/test_search.mjs`, `node tools/test_brands.mjs`; `node tools/perf_search.mjs` times the offline search)
 ```
 
 See `SPEC.md` for the full design and the algorithms.

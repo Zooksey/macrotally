@@ -142,3 +142,27 @@ logged or saved in the library are untouched.
 - tests (tools/test_calc.mjs): `setPackEnabled(id,false)` removes that pack's foods from `packFoods()` and
   `listPacks()` reports `enabled:false`; re-enabling restores; unknown id is a no-op.
 - sw.js VERSION -> `v8`, APP_VERSION -> `1.3.0` (done by the architect at the end, not by the agents).
+
+## 10. Packaged-product packs and brand packs (v1.8)
+
+The format string stays `macrotally-pack/1`; three optional fields are added.
+
+- Pack level `"kind": "products"`: a pack of packaged products (the bundled `data/packs/off-popular-us.json`, id
+  `off-popular-us`, name `Popular products (US)`, ~12,000 foods, ≤ 1.7 MB; and the AI helper's `my-brands` pack
+  "Brands you use"). `cleanPack` keeps `kind` only when it equals `products`; `listPacks()` rows gain `kind`
+  (and `remote: true` for a pack set with `setRemotePack`) only when set, so restaurant rows are unchanged.
+- Per food `b` (brand string, may be `''`): when the key holds a string, the Food's brand is `b`, else the pack's
+  brand. Per food `bc` (barcode digits; a number is accepted, non-digits are dropped): the Food's `barcode`.
+  Restaurant packs may use them too; nothing else changes for them.
+- Product foods (`kind: 'products'`) get `product: true` and always have grams: `s = [label, grams]` with `v` for
+  that serving; the serving label follows the Open Food Facts style ("30 g" → "1 serving (30 g)", a label with
+  "(…)" kept, else "<label> (<g> g)"), and the placeholder `['100 g', 100]` means no serving is known (servings
+  `[]`, defaultGrams 100). A product without grams falls back to the servingOnly form.
+- `packFoodByBarcode(code)` (digits, leading zeros ignored; index built once per pack list; only packs that are on)
+  lets `localByBarcode` in modals/food.js find a pack product after the library, so the scanner, typed barcodes and
+  Add via photo(s) work offline for these products.
+- `setRemotePack(id, obj|null)` / `remotePackInfo(id)`: an in-memory pack from elsewhere (js/brandpack.js), validated
+  like an import, overridden by a user pack with the same id, switchable with `setPackEnabled`.
+- Ranking: see SPEC.md (foods.js, "Ranking of product packs").
+- Bundled like the others: `off-popular-us.json` is in `data/packs/index.json` and in `SHELL` of sw.js, and loads
+  lazily with the other packs.

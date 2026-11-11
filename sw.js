@@ -3,8 +3,10 @@
    max-age=600) can never feed an old file into a new version. */
 
 /** Bump to invalidate old caches. */
-const VERSION = 'v27';
+const VERSION = 'v28';
 const CACHE = `macrotally-${VERSION}`;
+/** App data that must survive updates (the AI helper's "Brands you use" pack, js/brandpack.js): never deleted here. */
+const DATA_CACHE = 'macrotally-data';
 
 /** App shell, relative to the service worker scope (works from a sub-path). */
 const SHELL = [
@@ -23,6 +25,7 @@ const SHELL = [
   './js/update.js',
   './data/foods.json',
   './js/packs.js',
+  './js/brandpack.js',
   './data/packs/index.json',
   './data/packs/taco-bell.json',
   './data/packs/applebees.json',
@@ -62,6 +65,7 @@ const SHELL = [
   './data/packs/whataburger.json',
   './data/packs/wingstop.json',
   './data/packs/zaxbys.json',
+  './data/packs/off-popular-us.json',
   './js/scanner.js',
   './js/charts.js',
   './js/ui.js',
@@ -102,7 +106,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+    await Promise.all(keys.filter((k) => k !== CACHE && k !== DATA_CACHE).map((k) => caches.delete(k)));
     await self.clients.claim();
   })());
 });

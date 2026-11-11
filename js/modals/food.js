@@ -1,12 +1,12 @@
 // MacroTally — food modals: add-food search, food detail/amount, custom food editor, barcode scanner.
 import { state, uid, saveFood, deleteFood, addEntry, updateEntry, removeEntry, toggleFavorite } from '../store.js';
 import {
-  searchFoodsDetailed, lookupBarcode, effectiveUsdaKey, searchLocal, rankFoods, fullyMatches, fuzzyMap,
+  searchFoodsDetailed, lookupBarcode, effectiveUsdaKey, searchLocal, rankFoods, fullyMatches, fuzzyMap, warmSearchVocabulary,
   nutrientsFor, unitOptions, buildEntry, makeCustomFood, nutritionLooksOff
 } from '../foods.js';
-import { aiConfigured, askAi, downscaleImage } from '../ai.js';
+import { aiConfigured, aiUrl, askAi, downscaleImage } from '../ai.js';
 import { builtinFoods, loadBuiltinFoods } from '../builtin.js';
-import { packFoods, loadPacks } from '../packs.js';
+import { packFoods, loadPacks, packFoodByBarcode } from '../packs.js';
 import { startScanner, scannerSupported } from '../scanner.js';
 import {
   esc, fmt, fmtQty, parseNum, icon, on, openModal, closeModal, closeAllModals,
@@ -75,7 +75,7 @@ function sourceBadge(food) {
   if (food.origin) return '<span class="badge">Edited</span>';
   if (food.source === 'custom') return '<span class="badge">Custom</span>';
   if (food.source === 'usda' || food.source === 'builtin') return '<span class="badge">USDA</span>';
-  if (food.source === 'pack') return `<span class="badge">${esc(food.brand || 'Menu')}</span>`;
+  if (food.source === 'pack' && !food.product) return `<span class="badge">${esc(food.brand || 'Menu')}</span>`;
   return '';
 }
 
@@ -112,11 +112,16 @@ function normBarcode(code) {
   return String(code || '').replace(/\D/g, '').replace(/^0+/, '');
 }
 
-/** The library food with this barcode (digits compared, leading zeros ignored), or null. */
+/**
+ * The food with this barcode on this device (digits compared, leading zeros ignored): the library's first, else a
+ * product of a food pack that is on (the bundled popular-products pack, "Brands you use"), so a scan of a popular
+ * product works offline. null when neither has it.
+ */
 export function localByBarcode(code) {
   const n = normBarcode(code);
   if (!n) return null;
-  return Object.values(state.foods || {}).find((f) => f && f.barcode && normBarcode(f.barcode) === n) || null;
+  return Object.values(state.foods || {}).find((f) => f && f.barcode && normBarcode(f.barcode) === n)
+    || packFoodByBarcode(n);
 }
 
 const isBarcodeQuery = (q) => /^\d{8,14}$/.test(q);
@@ -139,6 +144,22 @@ function builtinPool() {
   return poolMemo.list;
 }
 
+/** Pending idle build of the typo vocabulary (see warmVocabularySoon). */
+let vocabWarm = null;
+
+/**
+ * Build the typo vocabulary of the built-in + pack list while the browser is idle (after a local search has
+ * tokenized every food), so the first misspelt word typed later does not wait for it.
+ */
+function warmVocabularySoon() {
+  if (vocabWarm) return;
+  const run = () => {
+    vocabWarm = null;
+    warmSearchVocabulary(builtinPool());
+  };
+  vocabWarm = typeof requestIdleCallback === 'function' ? requestIdleCallback(run, { timeout: 3000 }) : setTimeout(run, 500);
+}
+
 /** Instant, offline results: library + built-in list + food packs (or a library barcode match for a typed barcode). */
 function localResults(q) {
   if (isBarcodeQuery(q)) {
@@ -150,7 +171,8 @@ function localResults(q) {
     builtin: builtinPool(),
     recents: state.recents,
     favorites: state.favorites,
-    limit: 25
+    limit: 25,
+    plainFirst: true
   });
 }
 
@@ -181,11 +203,12 @@ function sourceNote(failed) {
 
 /**
  * Search result tag: ★ (favorite) or "library" for library foods, "USDA" for built-in and live USDA,
- * "menu" for food-pack items (their brand is already in the row), none for Open Food Facts.
+ * "menu" for restaurant-pack items (their brand is already in the row), none for Open Food Facts and packaged
+ * products from a products pack.
  */
 function resultTag(food) {
   if (state.foods && state.foods[food.id]) return isFavorite(food.id) ? '★' : 'library';
-  if (food.source === 'pack') return 'menu';
+  if (food.source === 'pack') return food.product ? '' : 'menu';
   return food.source === 'builtin' || food.source === 'usda' ? 'USDA' : '';
 }
 
@@ -265,8 +288,10 @@ function renderSearch(sheet) {
   const st = sheet._search;
   if (!box || !st) return;
   const local = localResults(st.q);
-  const foods = st.api
-    ? rankFoods(st.q, [...local, ...st.api], { ...rankOpts(), limit: 40, fuzzy: mergedFuzzy(st.q, local, st.fuzzy) })
+  // A live result already in the library is shown (and opened) as the library's copy, which may be edited.
+  const api = st.api ? st.api.map((f) => (state.foods && state.foods[f.id]) || f) : null;
+  const foods = api
+    ? rankFoods(st.q, [...local, ...api], { ...rankOpts(), limit: 40, fuzzy: mergedFuzzy(st.q, local, st.fuzzy), plainFirst: true })
     : local;
   let html = '';
   if (st.corrected) html += `<p class="search-note muted small">Showing results for "${esc(st.corrected)}"</p>`;
@@ -287,6 +312,7 @@ function renderSearch(sheet) {
   box.innerHTML = html;
   box.hidden = false;
   if (lib) lib.hidden = true;
+  warmVocabularySoon();
 }
 
 function hideResults(sheet) {
@@ -315,6 +341,8 @@ async function runSearch(sheet, q, seq) {
       const r = await searchFoodsDetailed(q, {
         usdaKey,
         region: state.profile.region || 'world',
+        // Open Food Facts text search goes through the AI helper's public search relay first (no secret needed).
+        relayUrl: aiUrl(state),
         // The faster source (usually USDA) shows at once; the spinner stays until the other answers.
         onPartial: (foods) => {
           if (!current()) return;
@@ -379,11 +407,60 @@ on('lib-tab', (el) => {
   if (lib) lib.innerHTML = libraryHtml();
 });
 
-on('pick-food', (el) => {
+/** Full products fetched for search-relay results this session (normalized barcode → Food). */
+const fullByBarcode = new Map();
+/** Longest wait for the full product behind a search-relay result before it opens as it is. */
+const FULL_LOOKUP_MS = 4000;
+/** Tap counter: only the latest tap on a result opens a sheet. */
+let pickSeq = 0;
+
+/**
+ * The full food for a search-relay result (`_partial`: no servings): the library's or a pack's copy of its
+ * barcode (no request), else the Open Food Facts product by barcode (lookupBarcode, capped at ~4 s), else null.
+ */
+async function fullFood(food) {
+  const n = normBarcode(food.barcode);
+  if (!n) return null;
+  const local = localByBarcode(n);
+  if (local) return local;
+  if (fullByBarcode.has(n)) return fullByBarcode.get(n);
+  let timer;
+  const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), FULL_LOOKUP_MS); });
+  const lookup = lookupBarcode(food.barcode, { usdaKey: effectiveUsdaKey(state.profile) }).catch(() => null);
+  const full = await Promise.race([lookup, timeout]);
+  clearTimeout(timer);
+  if (full) fullByBarcode.set(n, full);
+  else lookup.then((f) => { if (f) fullByBarcode.set(n, f); }); // a late answer still helps the next tap
+  return full || null;
+}
+
+on('pick-food', async (el) => {
   const ctx = ctxOf(el);
   const food = findFood(el.dataset.id);
-  if (!ctx || !food) return;
-  openFoodDetail(food, { meal: ctx.meal, date: ctx.date });
+  if (!ctx || !food || el.getAttribute('aria-busy') === 'true') return;
+  const seq = ++pickSeq;
+  if (!food._partial || !food.barcode) {
+    openFoodDetail(food, { meal: ctx.meal, date: ctx.date });
+    return;
+  }
+  // A search-relay result has no serving sizes: fetch the full product first, showing the row as busy.
+  const bd = backdropOf(el);
+  const chev = el.querySelector('.chev');
+  const chevHtml = chev ? chev.innerHTML : '';
+  el.setAttribute('aria-busy', 'true');
+  el.classList.add('is-busy');
+  if (chev) chev.innerHTML = '<span class="spinner" aria-hidden="true"></span>';
+  let full = null;
+  try {
+    full = await fullFood(food);
+  } finally {
+    el.removeAttribute('aria-busy');
+    el.classList.remove('is-busy');
+    if (chev) chev.innerHTML = chevHtml;
+  }
+  if (seq !== pickSeq || (bd && !bd.isConnected)) return;
+  if (full) foodCache.set(full.id, full);
+  openFoodDetail(full || food, { meal: ctx.meal, date: ctx.date });
 });
 
 on('open-scanner', (el) => {

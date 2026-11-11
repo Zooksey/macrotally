@@ -7,3 +7,7 @@ services:
     restart: unless-stopped
     tmpfs:
       - /tmp
+    volumes:
+      # Saved brand list and the "Brands you use" pack. The host folder must be writable by uid 1001
+      # (the container's "app" user): mkdir -p data && chown 1001:1001 data
+      - ./data:/data

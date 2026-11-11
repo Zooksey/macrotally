@@ -1,9 +1,12 @@
 /**
- * MacroTally — food packs: restaurant menus as searchable offline food lists (format `macrotally-pack/1`).
- * Bundled packs are listed in data/packs/index.json and loaded lazily once per session; user-imported packs
- * live in state.packs (raw pack JSON keyed by id, so backups carry them). A user pack with the same id as a
- * bundled pack overrides it. Packs whose id is in state.packsOff are switched off on this device: their foods are
- * left out of packFoods() (so search skips them); foods already logged or saved in the library are untouched.
+ * MacroTally — food packs: restaurant menus and packaged products as searchable offline food lists (format
+ * `macrotally-pack/1`; a pack with `kind: 'products'` holds packaged products with per-food brand `b` and barcode
+ * `bc`). Bundled packs are listed in data/packs/index.json and loaded lazily once per session; user-imported packs
+ * live in state.packs (raw pack JSON keyed by id, so backups carry them); a remote pack (the AI helper's "Brands you
+ * use" pack, see js/brandpack.js) is handed in with setRemotePack and kept in memory only. A user pack with the same
+ * id as a bundled or remote pack overrides it. Packs whose id is in state.packsOff are switched off on this device:
+ * their foods are left out of packFoods() (so search and barcode lookups skip them); foods already logged or saved
+ * in the library are untouched.
  */
 import { state, save } from './store.js';
 
@@ -19,10 +22,15 @@ const fmtG = (g) => String(Math.round(g * 10) / 10);
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0;
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
 
+/** Pack `kind` of packaged-product packs. */
+export const KIND_PRODUCTS = 'products';
+
 /** Validated bundled packs (id → pack) from the last successful load. */
 let bundled = new Map();
 /** Converted foods of the bundled packs (id → Food[]). */
 let bundledFoods = new Map();
+/** Remote packs handed in by setRemotePack (id → { pack, foods }), memory only. */
+const remote = new Map();
 /** In-flight or settled load; reset after a failure so a later call can retry. */
 let loading = null;
 let loaded = false;
@@ -32,8 +40,9 @@ let cacheUserRef = null;
 let cacheOffRef = null;
 
 /**
- * One validated pack food: `{ id, n, cat?, s: [label, grams|null], v: [kcal, p, c, f, fiber] }`, or null
- * when the food is unusable (missing id/name, or v not an array of >= 4 finite numbers >= 0).
+ * One validated pack food: `{ id, n, cat?, b?, bc?, s: [label, grams|null], v: [kcal, p, c, f, fiber] }`, or null
+ * when the food is unusable (missing id/name, or v not an array of >= 4 finite numbers >= 0). `b` (brand, may be
+ * '') is kept when the key holds a string; `bc` (barcode) when it has digits (non-digits dropped).
  */
 function cleanFood(f) {
   if (!isObj(f)) return null;
@@ -50,6 +59,11 @@ function cleanFood(f) {
   const out = { id, n, s: [label, grams], v };
   const cat = str(f.cat);
   if (cat) out.cat = cat;
+  if (typeof f.b === 'string') out.b = f.b.trim();
+  let bc = '';
+  if (typeof f.bc === 'number' && Number.isFinite(f.bc) && f.bc >= 0) bc = String(Math.trunc(f.bc));
+  else if (typeof f.bc === 'string') bc = f.bc.replace(/\D/g, '');
+  if (bc) out.bc = bc;
   return out;
 }
 
@@ -58,7 +72,8 @@ function cleanFood(f) {
  * (duplicate food ids keep the first). Throws an Error with a user-readable message when the pack itself
  * is invalid; a pack with zero valid foods is returned with an empty foods array (callers decide).
  * @param {*} obj
- * @returns {{format:string, id:string, name:string, brand:string, source:string, generated:string, foods:object[]}}
+ * @returns {{format:string, id:string, name:string, brand:string, source:string, generated:string, kind?:string, foods:object[]}}
+ *   kind is present only for a `kind: 'products'` pack
  */
 function cleanPack(obj) {
   if (!isObj(obj) || obj.format !== PACK_FORMAT) throw new Error('Not a MacroTally food pack (expected format "macrotally-pack/1").');
@@ -75,7 +90,7 @@ function cleanPack(obj) {
     seen.add(f.id);
     foods.push(f);
   }
-  return {
+  const out = {
     format: PACK_FORMAT,
     id,
     name,
@@ -84,14 +99,29 @@ function cleanPack(obj) {
     generated: str(obj.generated),
     foods
   };
+  if (str(obj.kind) === KIND_PRODUCTS) out.kind = KIND_PRODUCTS;
+  return out;
+}
+
+/** Serving label of a product food, as for Open Food Facts products ("30 g" → "1 serving (30 g)"). */
+function productServingLabel(label, grams) {
+  const t = String(label || '').trim();
+  if (!t) return `1 serving (${fmtG(grams)} g)`;
+  if (/^[\d.,]+\s*(g|gr|grams?|ml)$/i.test(t)) return `1 serving (${t})`;
+  if (t.includes('(')) return t;
+  return `${t} (${fmtG(grams)} g)`;
 }
 
 /**
  * Convert one pack food to a Food. With serving grams (`s[1]` > 0) it is a normal per-100 g food with one
  * serving "<label> (<g> g)"; without grams it is a `servingOnly` food whose per100 holds ONE serving and whose
  * single serving weighs a nominal 100 g (so qty 1 x 100 g = one serving).
- * @param {{id:string, brand?:string, name?:string}} pack
- * @param {{id:string|number, n:string, cat?:string, s?:Array, v:number[]}} f
+ * brand = the food's `b` when it has that key (even ''), else the pack's brand; barcode = `bc` (else null).
+ * A food of a `kind: 'products'` pack also gets `product: true`; its serving label follows the Open Food Facts style
+ * ("30 g" → "1 serving (30 g)"), and the placeholder serving ['100 g', 100] (no serving known) gives a per-100 g food
+ * with no servings (a product without grams falls back to the servingOnly form).
+ * @param {{id:string, brand?:string, name?:string, kind?:string}} pack
+ * @param {{id:string|number, n:string, cat?:string, b?:string, bc?:string, s?:Array, v:number[]}} f
  * @returns {object|null} Food (source 'pack'), or null when the food is malformed
  */
 export function packFoodToFood(pack, f) {
@@ -104,11 +134,22 @@ export function packFoodToFood(pack, f) {
     id: `pack:${packId}:${c.id}`,
     source: 'pack',
     packId,
-    barcode: null,
+    barcode: c.bc || null,
     name: c.n,
-    brand: String(pack.brand || pack.name || ''),
+    brand: c.b !== undefined ? c.b : String(pack.brand || pack.name || ''),
     category: c.cat || ''
   };
+  if (pack.kind === KIND_PRODUCTS) base.product = true;
+  if (base.product && grams) {
+    const k = 100 / grams;
+    const placeholder = grams === 100 && /^100\s*g$/i.test(label);
+    return {
+      ...base,
+      per100: { cal: r2(cal * k), p: r2(p * k), c: r2(carbs * k), f: r2(fat * k), fiber: r2(fiber * k) },
+      servings: placeholder ? [] : [{ label: productServingLabel(label, grams), grams }],
+      defaultGrams: grams
+    };
+  }
   if (grams) {
     const k = 100 / grams;
     return {
@@ -151,14 +192,15 @@ function offIds() {
   return new Set(Array.isArray(state.packsOff) ? state.packsOff.filter((x) => typeof x === 'string') : []);
 }
 
-/** Rebuild the converted food list (bundled packs overridden by user packs with the same id; off packs left out). */
+/** Rebuild the converted food list (bundled and remote packs overridden by user packs with the same id; off packs left out). */
 function refresh() {
   const users = userPacks();
   const off = offIds();
   const list = [];
-  for (const [id, foods] of bundledFoods) if (!users.has(id) && !off.has(id)) list.push(...foods);
+  for (const [id, foods] of bundledFoods) if (!users.has(id) && !remote.has(id) && !off.has(id)) list.push(...foods);
+  for (const [id, r] of remote) if (!users.has(id) && !off.has(id)) list.push(...r.foods);
   for (const p of users.values()) if (!off.has(p.id)) list.push(...convertPack(p));
-  cache = { list, users, off };
+  cache = { list, users, off, byBarcode: null };
   cacheUserRef = state.packs;
   cacheOffRef = state.packsOff;
 }
@@ -234,6 +276,59 @@ export function packFoods() {
 }
 
 /**
+ * The pack food (of a pack that is on) with this barcode, digits compared and leading zeros ignored, or null.
+ * The barcode index is built once per pack list.
+ * @param {string} code
+ * @returns {object|null} Food
+ */
+export function packFoodByBarcode(code) {
+  const n = String(code || '').replace(/\D/g, '').replace(/^0+/, '');
+  if (!n) return null;
+  const c = current();
+  if (!c.byBarcode) {
+    c.byBarcode = new Map();
+    for (const f of c.list) {
+      const k = f.barcode ? String(f.barcode).replace(/\D/g, '').replace(/^0+/, '') : '';
+      if (k && !c.byBarcode.has(k)) c.byBarcode.set(k, f);
+    }
+  }
+  return c.byBarcode.get(n) || null;
+}
+
+/**
+ * Set (or with null, clear) a remote pack, such as the AI helper's "Brands you use" pack. It is validated like an
+ * imported pack, kept in memory only (the caller stores it), listed by listPacks with `remote: true` and switchable
+ * like any pack.
+ * @param {string} id expected pack id
+ * @param {object|null} obj parsed pack JSON, or null to remove
+ * @returns {{id:string, name:string, count:number, generated:string}|null} the pack's summary (null when cleared)
+ * @throws {Error} when obj is not a valid pack, has another id, or has no valid foods
+ */
+export function setRemotePack(id, obj) {
+  const key = String(id || '');
+  if (obj === null || obj === undefined) {
+    if (remote.delete(key)) refresh();
+    return null;
+  }
+  const pack = cleanPack(obj);
+  if (pack.id !== key) throw new Error(`Expected pack "${key}", got "${pack.id}".`);
+  if (!pack.foods.length) throw new Error(`"${pack.name}" has no valid foods.`);
+  remote.set(key, { pack, foods: convertPack(pack) });
+  refresh();
+  return remotePackInfo(key);
+}
+
+/**
+ * Summary of a remote pack set with setRemotePack, or null.
+ * @param {string} id
+ * @returns {{id:string, name:string, count:number, generated:string}|null}
+ */
+export function remotePackInfo(id) {
+  const r = remote.get(String(id || ''));
+  return r ? { id: r.pack.id, name: r.pack.name, count: r.pack.foods.length, generated: r.pack.generated } : null;
+}
+
+/**
  * true once the bundled pack index has been loaded successfully (even when it lists no packs).
  * @returns {boolean}
  */
@@ -250,17 +345,22 @@ export function preloadPacks() {
 }
 
 /**
- * Packs available on this device, sorted by name. A user pack overriding a bundled one is listed once,
- * as the user pack. enabled is false for a pack switched off on this device.
- * @returns {{id:string, name:string, count:number, generated:string, bundled:boolean, enabled:boolean}[]}
+ * Packs available on this device, sorted by name. A user pack overriding a bundled or remote one is listed once,
+ * as the user pack. enabled is false for a pack switched off on this device. Remote packs (setRemotePack) have
+ * `remote: true`; a products pack has `kind: 'products'` (both keys only when set).
+ * @returns {{id:string, name:string, count:number, generated:string, bundled:boolean, enabled:boolean, remote?:boolean, kind?:string}[]}
  */
 export function listPacks() {
   const { users, off } = current();
   const out = [];
+  const withKind = (row, p) => (p.kind ? { ...row, kind: p.kind } : row);
   for (const p of bundled.values()) {
-    if (!users.has(p.id)) out.push({ id: p.id, name: p.name, count: (bundledFoods.get(p.id) || []).length, generated: p.generated, bundled: true, enabled: !off.has(p.id) });
+    if (!users.has(p.id) && !remote.has(p.id)) out.push(withKind({ id: p.id, name: p.name, count: (bundledFoods.get(p.id) || []).length, generated: p.generated, bundled: true, enabled: !off.has(p.id) }, p));
   }
-  for (const p of users.values()) out.push({ id: p.id, name: p.name, count: p.foods.length, generated: p.generated, bundled: false, enabled: !off.has(p.id) });
+  for (const { pack: p } of remote.values()) {
+    if (!users.has(p.id)) out.push(withKind({ id: p.id, name: p.name, count: p.foods.length, generated: p.generated, bundled: false, enabled: !off.has(p.id), remote: true }, p));
+  }
+  for (const p of users.values()) out.push(withKind({ id: p.id, name: p.name, count: p.foods.length, generated: p.generated, bundled: false, enabled: !off.has(p.id) }, p));
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 

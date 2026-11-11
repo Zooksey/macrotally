@@ -577,6 +577,87 @@ test('scoreFood: pack foods get the same curated bonus as built-in foods', () =>
   assert.equal(foods.scoreFood('burrito', { ...base, id: 'pack:a:1', source: 'pack' }), bi);
 });
 
+// ---------- product packs (kind: 'products', per-food b / bc) ----------
+const productPack = (extra = {}) => ({
+  format: 'macrotally-pack/1', id: 'test-products', name: 'Test products', brand: 'Open Food Facts', kind: 'products',
+  generated: '2026-11-10',
+  foods: [
+    { id: '0038000596476', n: 'Frosted Flakes', b: "Kellogg's", bc: '0038000596476', s: ['1 cup (39 g)', 39], v: [150, 2, 34, 0, 1] },
+    { id: '2', n: 'Plain Oats', b: '', bc: '12345678', s: ['100 g', 100], v: [380, 13, 67, 7, 10] },
+    { id: '3', n: 'Mystery Bar', s: ['1 bar', 40], v: [200, 10, 20, 8, 2] },
+    { id: '4', n: 'Numeric code', bc: 4006381333931, s: ['30 g', 30], v: [120, 3, 20, 3, 1] }
+  ],
+  ...extra
+});
+
+test('packFoodToFood: b / bc / kind products (brand override even when empty, barcode, product flag, servings)', () => {
+  const pk = productPack();
+  const [a, b, c, d] = pk.foods.map((f) => packs.packFoodToFood(pk, f));
+  assert.deepEqual(a, {
+    id: 'pack:test-products:0038000596476', source: 'pack', packId: 'test-products', barcode: '0038000596476',
+    name: 'Frosted Flakes', brand: "Kellogg's", category: '', product: true,
+    per100: { cal: 384.62, p: 5.13, c: 87.18, f: 0, fiber: 2.56 },
+    servings: [{ label: '1 cup (39 g)', grams: 39 }], defaultGrams: 39
+  });
+  assert.equal(b.brand, '', "b: '' overrides the pack brand");
+  assert.equal(b.barcode, '12345678');
+  assert.deepEqual(b.servings, [], "['100 g', 100] means no serving known");
+  assert.equal(b.defaultGrams, 100);
+  assert.deepEqual(b.per100, { cal: 380, p: 13, c: 67, f: 7, fiber: 10 });
+  assert.equal(c.brand, 'Open Food Facts', 'no b key → the pack brand');
+  assert.equal(c.barcode, null);
+  assert.deepEqual(c.servings, [{ label: '1 bar (40 g)', grams: 40 }]);
+  assert.equal(d.barcode, '4006381333931', 'numeric bc');
+  assert.deepEqual(d.servings, [{ label: '1 serving (30 g)', grams: 30 }]);
+  // Restaurant packs ignore nothing new: b / bc work there too, but no product flag and the old serving label.
+  const r = packs.packFoodToFood(TB, { id: '5', n: 'Taco', b: 'Taco Bell Cantina', bc: 'x12y', s: ['1 taco', null], v: [170, 8, 13, 10, 3] });
+  assert.equal(r.brand, 'Taco Bell Cantina');
+  assert.equal(r.barcode, '12');
+  assert.equal(r.product, undefined);
+  assert.equal(r.servingOnly, true);
+  assert.equal(packs.packFoodToFood(TB, { id: '6', n: 'Taco', bc: 'none', v: [1, 2, 3, 4] }).barcode, null);
+});
+
+test('packFoodByBarcode: pack products by barcode (leading zeros ignored), off packs skipped; listPacks kind', () => {
+  store.resetAll();
+  packs.importPack(JSON.stringify(productPack()));
+  assert.equal(packs.packFoodByBarcode('38000596476').id, 'pack:test-products:0038000596476');
+  assert.equal(packs.packFoodByBarcode('0038000596476').name, 'Frosted Flakes');
+  assert.equal(packs.packFoodByBarcode('012345678').id, 'pack:test-products:2');
+  assert.equal(packs.packFoodByBarcode('999'), null);
+  assert.equal(packs.packFoodByBarcode(''), null);
+  assert.deepEqual(packs.listPacks(), [{ id: 'test-products', name: 'Test products', count: 4, generated: '2026-11-10', bundled: false, enabled: true, kind: 'products' }]);
+  packs.setPackEnabled('test-products', false);
+  assert.equal(packs.packFoodByBarcode('38000596476'), null, 'switched off');
+  packs.setPackEnabled('test-products', true);
+  assert.ok(packs.packFoodByBarcode('38000596476'));
+  // Found by search like any pack food (brand from b).
+  assert.equal(foods.searchLocal('kelloggs frosted', { builtin: packs.packFoods() })[0].id, 'pack:test-products:0038000596476');
+  store.resetAll();
+  assert.equal(packs.packFoodByBarcode('38000596476'), null);
+});
+
+test('setRemotePack: validated, listed with remote: true, switchable, searchable by barcode; null clears', () => {
+  store.resetAll();
+  assert.throws(() => packs.setRemotePack('my-brands', { format: 'nope' }), /Not a MacroTally food pack/);
+  assert.throws(() => packs.setRemotePack('my-brands', productPack()), /Expected pack "my-brands"/);
+  assert.throws(() => packs.setRemotePack('my-brands', productPack({ id: 'my-brands', foods: [] })), /no valid foods/);
+  const info = packs.setRemotePack('my-brands', productPack({ id: 'my-brands', name: 'Brands you use' }));
+  assert.deepEqual(info, { id: 'my-brands', name: 'Brands you use', count: 4, generated: '2026-11-10' });
+  assert.deepEqual(packs.remotePackInfo('my-brands'), info);
+  assert.deepEqual(packs.listPacks(), [{ id: 'my-brands', name: 'Brands you use', count: 4, generated: '2026-11-10', bundled: false, enabled: true, remote: true, kind: 'products' }]);
+  assert.equal(packs.packFoodByBarcode('38000596476').id, 'pack:my-brands:0038000596476');
+  assert.equal(store.state.packs['my-brands'], undefined, 'never stored in state (localStorage)');
+  assert.equal(packs.setPackEnabled('my-brands', false), true);
+  assert.deepEqual(packs.packFoods(), []);
+  assert.equal(packs.setPackEnabled('my-brands', true), true);
+  assert.equal(packs.packFoods().length, 4);
+  assert.equal(packs.setRemotePack('my-brands', null), null);
+  assert.deepEqual(packs.listPacks(), []);
+  assert.equal(packs.remotePackInfo('my-brands'), null);
+  store.resetAll();
+});
+
 test('store: packs default + merge; backup restore takes packs from the backup, else keeps them', () => {
   store.resetAll();
   assert.deepEqual(store.state.packs, {});
@@ -852,12 +933,12 @@ await testAsync('searchFoods: parallel sources, built-in duplicates dropped, fai
   urls = [];
   globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes({}, 503); };
   await assert.rejects(foods.searchFoods('grilled chicken', { usdaKey: 'k', retryDelayMs: 0 }), /busy or rate-limiting/);
-  assert.equal(urls.length, 4, 'partial result was not cached (OFF tried three times, USDA once)');
+  assert.equal(urls.length, 3, 'partial result was not cached (OFF tried twice, USDA once)');
   // No key: only OFF (tried twice); its failure carries the scanning tip.
   urls = [];
   globalThis.fetch = async (u) => { urls.push(String(u)); throw new TypeError('offline'); };
   await assert.rejects(foods.searchFoods('bananas', { retryDelayMs: 0 }), /Barcode scanning still works/);
-  assert.equal(urls.length, 3);
+  assert.equal(urls.length, 2);
 });
 await testAsync('loadPacks: failures never throw (and retry), 404 → zero bundled foods, bundled + user override', async () => {
   store.resetAll();

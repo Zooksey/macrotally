@@ -11,6 +11,7 @@ import { autoBackupIfDue } from './drive.js';
 import { syncWeightFeed } from './feed.js';
 import { preloadBuiltinFoods } from './builtin.js';
 import { preloadPacks } from './packs.js';
+import { startBrandPack, refreshBrandPack } from './brandpack.js';
 import { registerAppUpdates, applyUpdate } from './update.js';
 import './modals/food.js';
 import './modals/ai.js'; // registers the add-food sheet's "AI add" handler
@@ -95,6 +96,7 @@ function onVisible() {
   }
   autoBackupIfDue(); // fire-and-forget; never throws
   syncWeightFeed(); // fire-and-forget; never rejects, at most every 30 min, no-op without a gist id
+  refreshBrandPack().then((r) => { if (r === 'updated') requestRender(); }); // never rejects; at most every 20 h, no-op without the AI helper
 }
 
 function registerServiceWorker() {
@@ -108,6 +110,8 @@ on('app-update', () => applyUpdate());
 function start() {
   preloadBuiltinFoods(); // fire-and-forget; never throws
   preloadPacks(); // fire-and-forget; never throws
+  // Stored "Brands you use" pack (no network), then brand sync + pack check with the AI helper; never rejects.
+  startBrandPack({ onUpdate: () => requestRender() });
   try {
     refreshExpenditure(state);
     snapshotTarget(state);

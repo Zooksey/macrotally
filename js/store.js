@@ -106,17 +106,25 @@ export function defaults() {
     feed: { gistId: '', lastSync: null, lastCount: 0, lastError: null, imported: {} },
     // AI helper (the owner's server running Claude; see js/ai.js and SPEC-ai.md). url + secret both set = on.
     // lastOk = ISO time of the last answer; lastError = message of the last failed request.
-    ai: { url: '', secret: '', lastOk: null, lastError: null }
+    ai: { url: '', secret: '', lastOk: null, lastError: null },
+    // Brands of the packaged products you log: { [brandKey]: { name, n, last } } (n = times logged, last = date).
+    // Sent (name + n) to the AI helper, which builds a "Brands you use" pack of their products; see js/brandpack.js.
+    brands: {},
+    // Brand keys removed by the user: never tracked again.
+    brandsOff: [],
+    // This device's helper sync bookkeeping (kept when a backup is imported): sent = JSON of the brand list last
+    // sent successfully, sentAt = when; packCheckedAt = ISO time of the last brand-pack request that got an answer.
+    brandSync: { sent: '', sentAt: null, packCheckedAt: null }
   };
 }
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/bank/drive/feed/ai objects are merged too. */
+/** Object.assign(defaults(), obj), but nested profile/goal/expenditure/bank/drive/feed/ai/brandSync objects are merged too. */
 function merge(obj) {
   const out = Object.assign(defaults(), isObj(obj) ? obj : {});
   const d = defaults();
-  for (const k of ['profile', 'goal', 'expenditure', 'bank', 'drive', 'feed', 'ai']) {
+  for (const k of ['profile', 'goal', 'expenditure', 'bank', 'drive', 'feed', 'ai', 'brandSync']) {
     out[k] = Object.assign({}, d[k], isObj(out[k]) ? out[k] : {});
   }
   out.goal.manual = Object.assign({}, d.goal.manual, isObj(out.goal.manual) ? out.goal.manual : {});
@@ -134,6 +142,33 @@ function merge(obj) {
   if (!isObj(out.diary)) out.diary = {};
   if (!isObj(out.packs)) out.packs = {};
   out.packsOff = Array.isArray(out.packsOff) ? [...new Set(out.packsOff.filter((x) => typeof x === 'string' && x))] : [];
+  // Search-relay foods are never stored with their `_partial` flag (saveFood strips it; this repairs older data).
+  for (const f of Object.values(out.foods)) if (isObj(f) && '_partial' in f) delete f._partial;
+  out.brands = repairBrands(out.brands);
+  out.brandsOff = Array.isArray(out.brandsOff) ? [...new Set(out.brandsOff.filter((x) => typeof x === 'string' && x))] : [];
+  if (typeof out.brandSync.sent !== 'string') out.brandSync.sent = '';
+  for (const k of ['sentAt', 'packCheckedAt']) if (typeof out.brandSync[k] !== 'string') out.brandSync[k] = null;
+  return out;
+}
+
+/** state.brands with only well-formed records ({ name: non-empty string, n: count >= 1, last: string|null }), re-keyed by brandKey. */
+function repairBrands(brands) {
+  const out = {};
+  if (!isObj(brands)) return out;
+  for (const [k, b] of Object.entries(brands)) {
+    if (!isObj(b)) continue;
+    const name = typeof b.name === 'string' ? b.name.trim() : '';
+    const key = brandKey(name) || brandKey(k);
+    const n = Math.floor(Number(b.n));
+    if (!name || !key || !(n >= 1)) continue;
+    const prev = out[key];
+    if (prev) {
+      prev.n += n;
+      if (typeof b.last === 'string' && (!prev.last || b.last > prev.last)) prev.last = b.last;
+    } else {
+      out[key] = { name, n, last: typeof b.last === 'string' ? b.last : null };
+    }
+  }
   return out;
 }
 
@@ -202,8 +237,8 @@ export function exportJSON() {
 }
 
 /**
- * Restore a backup produced by exportJSON(). This device's state.drive block is kept
- * (the Drive connection belongs to the device, not to the backup). The backup's imported food
+ * Restore a backup produced by exportJSON(). This device's state.drive and state.brandSync blocks are kept
+ * (the Drive connection and the helper sync bookkeeping belong to the device, not to the backup). The backup's imported food
  * packs (state.packs) are restored when it has them; an older backup without a packs object keeps
  * the packs already on this device.
  * @param {string} text
@@ -220,8 +255,10 @@ export function importJSON(text) {
   if (!obj || typeof obj !== 'object' || !obj.diary || !obj.version) throw new Error('Not a MacroTally backup');
   const keep = state.drive;
   const keepPacks = state.packs;
+  const keepSync = state.brandSync;
   replaceState(obj);
   state.drive = keep;
+  state.brandSync = keepSync;
   if (!isObj(obj.packs) && isObj(keepPacks)) state.packs = keepPacks;
   save();
 }
@@ -282,8 +319,106 @@ export function getDay(date) {
   return state.diary[date];
 }
 
+// ---------- Brands you use ----------
+
 /**
- * Append an entry to a day (assigns an id if missing), bump the food in recents, save.
+ * Key of a brand name: lowercase, trimmed, apostrophes removed, runs of anything but letters/digits collapsed to
+ * one space ("Kellogg's" → "kelloggs", "Ben & Jerry's" → "ben jerrys").
+ * @param {string} name
+ * @returns {string} '' for a blank name
+ */
+export function brandKey(name) {
+  return String(name ?? '').toLowerCase().replace(/['’`]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+/** Listeners called after state.brands changes (js/brandpack.js schedules the helper sync). */
+const brandListeners = new Set();
+
+/**
+ * Call fn() after every change of state.brands (a branded product logged, a brand removed).
+ * @param {Function} fn
+ * @returns {() => void} unsubscribe
+ */
+export function onBrandsChange(fn) {
+  brandListeners.add(fn);
+  return () => brandListeners.delete(fn);
+}
+
+function brandsChanged() {
+  for (const fn of brandListeners) {
+    try {
+      fn();
+    } catch (e) {
+      console.warn(e);
+    }
+  }
+}
+
+/** Casing quality of a brand name: mixed case 2 ("Kellogg's"), all capitals 1 ("KELLOGG'S"), else 0. */
+function casing(name) {
+  const lower = /\p{Ll}/u.test(name);
+  const upper = /\p{Lu}/u.test(name);
+  if (lower && upper) return 2;
+  return upper ? 1 : 0;
+}
+
+/**
+ * Whether a food is a packaged product whose brand is worth tracking: an Open Food Facts or USDA food, any food with
+ * a barcode, or a food from a `kind: 'products'` pack (`product: true`). Restaurant-pack items, built-in foods and
+ * custom foods without a barcode are not.
+ * @param {object} food
+ * @returns {boolean}
+ */
+export function isPackagedProduct(food) {
+  if (!isObj(food)) return false;
+  if (food.source === 'off' || food.source === 'usda') return true;
+  if (food.barcode && String(food.barcode).replace(/\D/g, '')) return true;
+  return food.source === 'pack' && food.product === true;
+}
+
+/** Count one logged entry's brand (see addEntry). Returns true when state.brands changed. */
+function trackBrand(date, entry) {
+  const food = entry.foodId && isObj(state.foods) ? state.foods[entry.foodId] : null;
+  if (!isPackagedProduct(food)) return false;
+  const name = String(food.brand || entry.brand || '').split(',')[0].trim();
+  const key = brandKey(name);
+  if (!key || (Array.isArray(state.brandsOff) && state.brandsOff.includes(key))) return false;
+  if (!isObj(state.brands)) state.brands = {};
+  const b = state.brands[key];
+  if (!b) {
+    state.brands[key] = { name, n: 1, last: date || null };
+  } else {
+    b.n = (Math.floor(Number(b.n)) || 0) + 1;
+    if (date && (!b.last || date > b.last)) b.last = date;
+    if (casing(name) > casing(String(b.name || ''))) b.name = name;
+  }
+  return true;
+}
+
+/**
+ * Stop tracking a brand: removes it from state.brands and adds its key to state.brandsOff, so later logs do not
+ * bring it back. Saves.
+ * @param {string} key a state.brands key (or a brand name)
+ * @returns {boolean} true when something changed
+ */
+export function removeBrand(key) {
+  const k = brandKey(key);
+  if (!k) return false;
+  const had = isObj(state.brands) && Object.prototype.hasOwnProperty.call(state.brands, k);
+  if (had) delete state.brands[k];
+  const off = Array.isArray(state.brandsOff) ? state.brandsOff : [];
+  const added = !off.includes(k);
+  if (added) state.brandsOff = [...off, k];
+  if (!had && !added) return false;
+  save();
+  if (had) brandsChanged();
+  return true;
+}
+
+/**
+ * Append an entry to a day (assigns an id if missing), bump the food in recents, save. When the logged food (looked
+ * up in state.foods by entry.foodId) is a packaged product with a brand (see isPackagedProduct), that brand's count in
+ * state.brands goes up (unless the user removed the brand).
  * @param {string} date
  * @param {object} entry
  * @returns {void}
@@ -292,7 +427,9 @@ export function addEntry(date, entry) {
   if (!entry.id) entry.id = uid();
   getDay(date).entries.push(entry);
   if (entry.foodId) touchRecent(entry.foodId);
+  const tracked = trackBrand(date, entry);
   save();
+  if (tracked) brandsChanged();
 }
 
 /**
@@ -346,12 +483,18 @@ export function toggleFavorite(foodId) {
 }
 
 /**
- * Store a food in the local library and save.
+ * Store a food in the local library and save. A search-relay food's `_partial` flag is never stored (a copy
+ * without it is saved).
  * @param {object} food
  * @returns {void}
  */
 export function saveFood(food) {
-  state.foods[food.id] = food;
+  let f = food;
+  if (isObj(f) && '_partial' in f) {
+    f = { ...f };
+    delete f._partial;
+  }
+  state.foods[f.id] = f;
   save();
 }
 

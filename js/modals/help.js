@@ -66,7 +66,7 @@ function scanningBody() {
       <li>Allow the camera when asked, and hold the barcode inside the frame.</li>
       <li>The food opens with its numbers. Set the amount and add it as usual.</li>
     </ol>
-    <p>The app checks your own foods first, then Open Food Facts and USDA, so a food you have fixed is always found with your numbers.</p>
+    <p>The app checks your own foods first, then the food packs on this phone, then Open Food Facts and USDA, so a food you have fixed is always found with your numbers. About 12,000 popular US products are built in (the <strong>Popular products (US)</strong> pack), so scanning one of them works even without a connection.</p>
     <h3>No camera prompts: Add via photo(s)</h3>
     <p>If your phone asks for camera permission every time you scan, tap <strong>Add via photo(s)</strong> instead. It uses your phone's own camera app, so it never asks. Tap <strong>Take photo</strong>, snap the barcode and tap <strong>Find food</strong>; the barcode is read from the photo and looked up as usual. With the AI helper set up, also snap the Nutrition Facts panel and the front label, and Claude reads the food from them when the barcode isn't found.</p>
     <h3>When the camera doesn't work</h3>
@@ -153,6 +153,9 @@ function planBody() {
 }
 
 function dataBody() {
+  const brands = aiConfigured(state)
+    ? '<p>The brands of the packaged foods you log are counted on this phone and sent to your AI helper (just the brand names and how often you logged them). The helper bundles those brands\' products into a <strong>Brands you use</strong> pack, which the app downloads about once a day, so they search and scan offline too. <strong>Settings</strong> → <strong>Brands you use</strong> lists the brands; tap × to stop tracking one, or <strong>Check for a new pack</strong>.</p>'
+    : '<p>With the AI helper set up, the brands of the packaged foods you log are sent to it, and it bundles their products into a <strong>Brands you use</strong> pack for search and offline scanning. See <strong>Settings</strong> → <strong>Brands you use</strong>.</p>';
   const drive = driveConfigured()
     ? `<p>In <strong>Settings</strong> → <strong>Google Drive backup</strong>, tap <strong>Connect Google Drive</strong>. Your data is copied to a private app folder in your own Google Drive about once a day when you open the app. <strong>Back up now</strong> and <strong>Restore from Drive</strong> are there too.</p>`
     : `<p>Daily backup to your own Google Drive is available only when the person hosting the app has set it up; it is not set up in this copy. See the ${readmeLink('README')}.</p>`;
@@ -164,12 +167,15 @@ function dataBody() {
     <h3>Where food data comes from</h3>
     <ul>
       <li>A built-in list of generic foods, searched instantly, even offline.</li>
-      <li>Open Food Facts, always on, for barcodes and search. It allows about 10 searches a minute, so the app waits for you to stop typing.</li>
+      <li><strong>Popular products (US)</strong>: about 12,000 popular packaged products, also searched instantly and offline, and found by their barcode.</li>
+      <li>Open Food Facts, always on, for barcodes and search. Text searches go through the AI helper's search relay when it can be reached (only the words you search for are sent), and straight to Open Food Facts when it can't. The app waits for you to stop typing. A result from the relay has no serving sizes yet: tapping it fetches them first (a small spinner shows on the row).</li>
       <li>USDA FoodData Central, with a shared key built in. Add your own free key in <strong>Settings</strong> → <strong>Food sources</strong> to avoid its hourly limit.</li>
     </ul>
     <p>Set your <strong>Search region</strong> there too, so results favour foods sold in your country.</p>
-    <h3>Restaurant food packs</h3>
-    <p>Packs are restaurant menus, logged per item; search like "taco bell burrito". In <strong>Settings</strong> → <strong>Food packs</strong>, switch off chains you never visit, or use <strong>Import food pack</strong> to add one from a file.</p>
+    <h3>Food packs</h3>
+    <p>Packs are restaurant menus, logged per item (search like "taco bell burrito"), and lists of packaged products. In <strong>Settings</strong> → <strong>Food packs</strong>, switch off packs you don't need, or use <strong>Import food pack</strong> to add one from a file.</p>
+    <h3>Brands you use</h3>
+    ${brands}
     <h3>Updates</h3>
     <p>Updates install themselves: close the app fully and reopen it. When a new version is ready, the Diary shows <strong>New version ready · Tap to reload</strong>. <strong>Check for updates</strong> is under <strong>About</strong> at the bottom of Settings.</p>`;
 }
@@ -183,7 +189,7 @@ export const HELP_TOPICS = [
   { id: 'fixing', title: 'Custom foods and fixing numbers', sub: 'Create, edit any food, label photos', body: fixingBody },
   { id: 'weight', title: 'Weight', sub: 'Weigh-ins, the trend line, smart scales', body: weightBody },
   { id: 'plan', title: 'Goal, targets and expenditure', sub: 'Rates, adaptive calories, the calorie bank', body: planBody },
-  { id: 'data', title: 'Backups, sync and food data', sub: 'Export, Google Drive, sources, packs, updates', body: dataBody }
+  { id: 'data', title: 'Backups, sync and food data', sub: 'Export, Google Drive, sources, packs, brands, updates', body: dataBody }
 ];
 
 /**

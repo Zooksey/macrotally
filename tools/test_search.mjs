@@ -1,4 +1,5 @@
-// MacroTally search tests: typo tolerance, Open Food Facts retry, progressive results, spelling second chance.
+// MacroTally search tests: typo tolerance, Open Food Facts retry, progressive results, spelling second chance,
+// the AI helper's search relay, and product packs vs library / live copies in ranking.
 // No network (fetch is stubbed). Run from the project root: node tools/test_search.mjs
 import assert from 'node:assert/strict';
 
@@ -205,7 +206,7 @@ await testAsync('OFF search: no retry on timeout (AbortError) or other statuses;
   calls = 0;
   globalThis.fetch = async () => { calls++; return jsonRes({}, 503); };
   await assert.rejects(foods.searchFoods('plum tart', { retryDelayMs: 0 }), /busy or rate-limiting/);
-  assert.equal(calls, 3, 'two retries, then the error');
+  assert.equal(calls, 2, 'one retry, then the error');
 });
 
 await testAsync('USDA requests are not retried; barcode lookups are not retried', async () => {
@@ -319,10 +320,10 @@ await testAsync('second chance: other words kept, longest unmatched word replace
   assert.equal(r.correctedQuery, 'miss vickies chips');
   assert.deepEqual(ids(r.foods).sort(), ['off:41', 'usda:42']);
   assert.deepEqual(r.failed, [], 'the extra request is not a failed source');
-  assert.equal(urls.length, 6, 'OFF, USDA, USDA wildcard, OFF corrected three times (two retries)');
+  assert.equal(urls.length, 5, 'OFF, USDA, USDA wildcard, OFF corrected twice (one retry)');
   urls.length = 0;
   await foods.searchFoodsDetailed('Miss Vickey chips', { usdaKey: 'k', retryDelayMs: 0 });
-  assert.equal(urls.length, 6, 'not cached after the failed extra request');
+  assert.equal(urls.length, 5, 'not cached after the failed extra request');
 });
 
 await testAsync('no second chance: a full match exists, no USDA key, short words, nothing close, or USDA failed', async () => {
@@ -382,6 +383,237 @@ test('brandAlias: brands typed by sound are searched under their real spelling',
   const rk = { id: 'off:1', source: 'off', name: 'Rice Krispies', brand: "Kellogg's", per100: { cal: 380, p: 6, c: 87, f: 1 } };
   const bar = { id: 'off:2', source: 'off', name: 'Caramelized Crisped Rice Bar', brand: '', per100: { cal: 400, p: 5, c: 70, f: 10 } };
   assert.deepEqual(foods.rankFoods('rice crispie', [bar, rk], { fuzzy: a.fuzzy }).map((f) => f.id), ['off:1', 'off:2']);
+});
+
+// ---------- search relay (the AI helper's GET /v1/search), stubbed fetch ----------
+const { packFoodToFood } = await import('../js/packs.js');
+const RELAY = 'https://relay.example';
+const isRelay = (u) => u.startsWith('https://relay') || u.startsWith('https://old');
+const relayProduct = (code, name, extra = {}) => ({
+  code, product_name: name, brands: 'Acme, Acme Foods',
+  nutriments: { 'energy-kcal_100g': 380, proteins_100g: 7, carbohydrates_100g: 84, fat_100g: 1, fiber_100g: 3 },
+  unique_scans_n: 900, partial: true, ...extra
+});
+/** Short label per request: relay:<q>, off:<search_terms>, usda:<query>. */
+const label = (u) => {
+  if (isRelay(u)) return `relay:${param(u, 'q')}`;
+  return isOff(u) ? `off:${param(u, 'search_terms')}` : `usda:${param(u, 'query')}`;
+};
+
+await testAsync('relay: success maps products (per 100 g, no servings, first brand) and marks _partial; no Authorization; OFF cgi not called', async () => {
+  const calls = [];
+  globalThis.fetch = async (u, opts = {}) => {
+    calls.push({ u: String(u), opts });
+    return jsonRes({ products: [relayProduct('0038000596476', 'Corn Flakes'), { code: '2', product_name: '' }, relayProduct('3', 'Empty', { nutriments: {} })], source: 'search-a-licious', cached: false });
+  };
+  const r = await foods.searchFoodsDetailed('corn flakes', { region: 'us', relayUrl: `${RELAY}/` });
+  assert.deepEqual(calls.map((c) => label(c.u)), ['relay:corn flakes']);
+  assert.ok(calls[0].u.startsWith(`${RELAY}/v1/search?`), calls[0].u);
+  assert.equal(param(calls[0].u, 'region'), 'us');
+  assert.ok(!calls[0].opts.headers || !('Authorization' in calls[0].opts.headers), 'no Authorization header');
+  assert.equal(r.foods.length, 1, 'nameless and nutrient-less products dropped');
+  const f = r.foods[0];
+  assert.equal(f.id, 'off:0038000596476');
+  assert.equal(f.barcode, '0038000596476');
+  assert.equal(f.source, 'off');
+  assert.equal(f.brand, 'Acme');
+  assert.equal(f._partial, true);
+  assert.deepEqual(f.servings, []);
+  assert.equal(f.defaultGrams, 100);
+  assert.deepEqual(f.per100, { cal: 380, p: 7, c: 84, f: 1, fiber: 3 });
+  assert.equal(f.pop, 900);
+  assert.deepEqual(r.failed, []);
+  calls.length = 0;
+  await foods.searchFoodsDetailed('corn flakes', { region: 'us', relayUrl: RELAY });
+  assert.equal(calls.length, 0, 'cached for the session');
+});
+
+await testAsync('relay failure (network, 500, 429, bad JSON, timeout-like abort) → legacy cgi search; call order relay then cgi', async () => {
+  const failures = {
+    network: async () => { throw new TypeError('Failed to fetch'); },
+    http500: async () => jsonRes({ error: 'x' }, 500),
+    http429: async () => jsonRes({ error: 'rate limited' }, 429),
+    http502: async () => jsonRes({ error: 'upstream' }, 502),
+    badJson: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad'); } }),
+    noProducts: async () => jsonRes({ hello: 1 }),
+    abort: async () => { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
+  };
+  for (const [name, fail] of Object.entries(failures)) {
+    const urls = [];
+    globalThis.fetch = async (u) => {
+      urls.push(String(u));
+      return isRelay(String(u)) ? fail() : jsonRes({ products: [offProduct('77', 'Granola bar')] });
+    };
+    const q = `granola ${name}`;
+    const r = await foods.searchFoodsDetailed(q, { relayUrl: RELAY, retryDelayMs: 0 });
+    assert.deepEqual(urls.map(label), [`relay:${q}`, `off:${q}`], name);
+    assert.deepEqual(ids(r.foods), ['off:77'], name);
+    assert.equal(r.foods[0]._partial, undefined, `${name}: cgi foods are full`);
+    assert.deepEqual(r.failed, [], name);
+  }
+  // A non-404 failure does not skip the relay next time.
+  const urls = [];
+  globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes({ products: [relayProduct('78', 'Granola clusters')] }); };
+  await foods.searchFoodsDetailed('granola clusters', { relayUrl: RELAY });
+  assert.deepEqual(urls.map(label), ['relay:granola clusters']);
+});
+
+await testAsync('relay fails and cgi is busy: cgi retried ONCE; both failing throws the Open Food Facts error', async () => {
+  const urls = [];
+  let cgi = 0;
+  globalThis.fetch = async (u) => {
+    urls.push(String(u));
+    if (isRelay(String(u))) throw new TypeError('offline');
+    return ++cgi === 1 ? jsonRes({}, 503) : jsonRes({ products: [offProduct('81', 'Muesli')] });
+  };
+  const r = await foods.searchFoodsDetailed('muesli', { relayUrl: RELAY, retryDelayMs: 0 });
+  assert.deepEqual(urls.map(label), ['relay:muesli', 'off:muesli', 'off:muesli']);
+  assert.deepEqual(ids(r.foods), ['off:81']);
+  urls.length = 0;
+  globalThis.fetch = async (u) => { urls.push(String(u)); return isRelay(String(u)) ? jsonRes({}, 502) : jsonRes({}, 503); };
+  await assert.rejects(foods.searchFoodsDetailed('bircher muesli', { relayUrl: RELAY, retryDelayMs: 0 }), /busy or rate-limiting/);
+  assert.equal(urls.length, 3, 'relay once, cgi twice');
+});
+
+await testAsync('relay 404 / 401 (older helper): cgi used, and the relay is skipped on later searches', async () => {
+  for (const [status, base] of [[404, 'https://old404.example'], [401, 'https://old401.example']]) {
+    const urls = [];
+    globalThis.fetch = async (u) => {
+      urls.push(String(u));
+      return String(u).startsWith(base) ? jsonRes({ error: 'not found' }, status) : jsonRes({ products: [offProduct(`9${status}`, 'Trail mix')] });
+    };
+    await foods.searchFoodsDetailed(`trail mix ${status}`, { relayUrl: base });
+    assert.deepEqual(urls.map((u) => (u.startsWith(base) ? 'relay' : 'off')), ['relay', 'off'], `${status}: first search`);
+    urls.length = 0;
+    await foods.searchFoodsDetailed(`nut mix ${status}`, { relayUrl: base });
+    assert.deepEqual(urls.map((u) => (u.startsWith(base) ? 'relay' : 'off')), ['off'], `${status}: relay skipped next time`);
+  }
+  // Another relay address is unaffected.
+  const urls = [];
+  globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes({ products: [] }); };
+  await foods.searchFoodsDetailed('nut mix other', { relayUrl: 'https://relay2.example' });
+  assert.deepEqual(urls.map((u) => (u.startsWith('https://relay2') ? 'relay' : 'off')), ['relay']);
+});
+
+await testAsync('no relayUrl (or blank) → legacy cgi only', async () => {
+  for (const relayUrl of [undefined, '', '   ']) {
+    const urls = [];
+    globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes({ products: [offProduct('91', 'Rye bread')] }); };
+    const r = await foods.searchFoodsDetailed(`rye bread ${String(relayUrl).length}`, relayUrl === undefined ? {} : { relayUrl });
+    assert.equal(urls.length, 1);
+    assert.ok(isOff(urls[0]) && urls[0].includes('/cgi/search.pl?'), urls[0]);
+    assert.deepEqual(ids(r.foods), ['off:91']);
+  }
+});
+
+await testAsync('second chance through the relay: "vickey" → USDA "vick*" → relay "vickies"; brandAlias searches the relay with the real spelling', async () => {
+  const urls = [];
+  globalThis.fetch = async (u) => {
+    const s = String(u);
+    urls.push(s);
+    if (isRelay(s)) {
+      return param(s, 'q') === 'vickies'
+        ? jsonRes({ products: [relayProduct('0060410017563', "Miss Vickie's Original Kettle Cooked Potato Chips", { brands: "Miss Vickie's" })] })
+        : jsonRes({ products: [] });
+    }
+    if (param(s, 'query') === 'vick*') return jsonRes({ foods: [usdaItem(131, "MISS VICKIE'S JALAPENO KETTLE COOKED POTATO CHIPS", { brandOwner: 'Frito-Lay' })] });
+    return jsonRes({ foods: [] });
+  };
+  const r = await foods.searchFoodsDetailed('vickey', { usdaKey: 'k2', relayUrl: RELAY, retryDelayMs: 0 });
+  assert.deepEqual(urls.map(label), ['relay:vickey', 'usda:vickey', 'usda:vick*', 'relay:vickies']);
+  assert.equal(r.corrected, 'vickies');
+  assert.deepEqual(ids(r.foods).sort(), ['off:0060410017563', 'usda:131']);
+  assert.equal(r.foods.find((f) => f.id === 'off:0060410017563')._partial, true);
+  // The corrected search falls back to cgi when the relay fails.
+  urls.length = 0;
+  globalThis.fetch = async (u) => {
+    const s = String(u);
+    urls.push(s);
+    if (isRelay(s)) return param(s, 'q') === 'vickies' ? jsonRes({}, 502) : jsonRes({ products: [] });
+    if (isOff(s)) return jsonRes({ products: [offProduct('0060410017564', "Miss Vickie's Sea Salt")] });
+    if (param(s, 'query') === 'vick*') return jsonRes({ foods: [usdaItem(132, "MISS VICKIE'S SEA SALT POTATO CHIPS")] });
+    return jsonRes({ foods: [] });
+  };
+  const r2 = await foods.searchFoodsDetailed('vickey', { usdaKey: 'k3', region: 'ca', relayUrl: RELAY, retryDelayMs: 0 });
+  assert.deepEqual(urls.map(label), ['relay:vickey', 'usda:vickey', 'usda:vick*', 'relay:vickies', 'off:vickies']);
+  assert.deepEqual(ids(r2.foods).sort(), ['off:0060410017564', 'usda:132']);
+  // Alias: "rice crispie" is searched as "rice krispies" on the relay.
+  urls.length = 0;
+  globalThis.fetch = async (u) => { urls.push(String(u)); return jsonRes({ products: [relayProduct('0038000001109', 'Rice Krispies', { brands: "Kellogg's" })] }); };
+  const r3 = await foods.searchFoodsDetailed('rice crispie', { relayUrl: RELAY });
+  assert.deepEqual(urls.map(label), ['relay:rice krispies']);
+  assert.equal(r3.corrected, 'rice krispies');
+  assert.equal(foods.rankFoods('rice crispie', r3.foods, { fuzzy: r3.fuzzy })[0].id, 'off:0038000001109');
+});
+
+// ---------- product packs vs library vs live copies ----------
+const POP = { id: 'off-popular-us', name: 'Popular products (US)', brand: 'Open Food Facts', kind: 'products' };
+const packProduct = (id, n, bc, extra = {}) => packFoodToFood(POP, { id, n, b: "Kellogg's", bc, s: ['1 cup (39 g)', 39], v: [150, 2, 34, 0, 1], ...extra });
+
+test('rank: library food > pack product > partial live copy of the same barcode (de-dup keeps one)', () => {
+  const pack = packProduct('1', 'Frosted Flakes', '0038000596476');
+  const partial = { ...foods.foodFromOFF(relayProduct('0038000596476', 'Frosted Flakes', { brands: "Kellogg's" })), _partial: true };
+  const full = foods.foodFromOFF({ ...relayProduct('38000596476', 'Frosted Flakes', { brands: "Kellogg's" }), serving_size: '1 cup (39 g)', unique_scans_n: 1e6 });
+  const lib = foods.makeCustomFood({ id: 'off:0038000596476', name: 'Frosted Flakes (mine)', brand: "Kellogg's", barcode: '0038000596476', per: '100g', cal: 380, p: 5, c: 87, f: 0, origin: 'off' });
+  const localIds = new Set([lib.id]);
+  const q = 'frosted flakes';
+  assert.ok(foods.scoreFood(q, partial) > 0 && foods.scoreFood(q, pack) > 0);
+  // Partial live copy vs pack copy: the pack copy is kept, whichever scores higher or comes first.
+  assert.deepEqual(foods.rankFoods(q, [partial, pack]), [pack]);
+  assert.deepEqual(foods.rankFoods(q, [pack, partial]), [pack]);
+  // A full live copy with a huge scan count still loses to the pack copy of the same barcode; it beats a partial one.
+  assert.deepEqual(foods.rankFoods(q, [full, pack, partial]), [pack]);
+  assert.deepEqual(foods.rankFoods(q, [partial, full]), [full]);
+  // The library copy wins over all of them.
+  assert.deepEqual(foods.rankFoods(q, [partial, pack, full, lib], { localIds }), [lib]);
+  // The kept copy takes the best-scored copy's place in the list.
+  const other = { ...foods.foodFromOFF(relayProduct('5', 'Frosted Flakes Cereal Bars Strawberry Pack')), _partial: true };
+  const ranked = foods.rankFoods(q, [other, partial, pack]);
+  assert.deepEqual(ranked.map((f) => f.id), [pack.id, 'off:5']);
+});
+
+test('rank: product-pack foods: curated bonus, long names not buried, below the library and above live copies at equal names', () => {
+  const q = 'chicken breast';
+  const live = (id, name, extra = {}) => ({ id, source: 'off', barcode: null, name, brand: 'Farm', per100: { cal: 120, p: 23, c: 0, f: 2.5, fiber: 0 }, servings: [], defaultGrams: 100, pop: 50, ...extra });
+  const prod = packProduct('2', 'Chicken Breast Strips', '0001', { b: 'Farm' });
+  const liveSame = live('off:9', 'Chicken Breast Strips');
+  assert.ok(foods.scoreFood(q, prod) > foods.scoreFood(q, liveSame), 'product beats an equal live result');
+  const lib = live('custom:1', 'Chicken Breast Strips', { source: 'custom' });
+  assert.ok(foods.scoreFood(q, lib, { localIds: new Set(['custom:1']) }) > foods.scoreFood(q, prod), 'library beats an equal product');
+  // A long product name pays at most 1.5 for its extra words; a live result pays 0.5 each.
+  const longName = 'Chicken Breast Boneless Skinless Organic Family Value Pack';
+  const longProd = packProduct('3', longName, '0002', { b: 'Farm' });
+  const longLive = live('off:10', longName, { pop: 0 });
+  assert.ok(foods.scoreFood(q, longProd) - foods.scoreFood(q, longLive) >= 3.5, 'capped penalty');
+  // Still ordered by how much of the name the query covers.
+  assert.ok(foods.scoreFood(q, prod) > foods.scoreFood(q, longProd));
+  // Restaurant-pack foods keep the flat bonus (no per-word cost).
+  const menu = packFoodToFood({ id: 'diner', name: 'Diner', brand: 'Diner' }, { id: '1', n: longName, s: ['1 plate', null], v: [500, 40, 20, 20, 2] });
+  assert.ok(foods.scoreFood(q, menu) > foods.scoreFood(q, longProd));
+});
+
+test('plainFirst: generic searches lead with the everyday built-in food, brand searches are untouched', () => {
+  const n = { cal: 100, p: 5, c: 10, f: 3 };
+  const b = (id, name) => ({ id: `usda:${id}`, source: 'builtin', name, brand: '', per100: n });
+  const prod = (id, name, brand) => ({ id: `pack:p:${id}`, source: 'pack', product: true, barcode: `00000000${id}`, name, brand, per100: n });
+  const pool = [
+    prod(11, 'Egg', 'Costco'), prod(12, 'Eggs', 'Trader Joes'), prod(13, 'Eggs', 'Members Mark'), prod(14, 'Egg', 'Kirkland'),
+    b(1, 'Egg, white, dried'), b(2, 'Egg, whole, raw, fresh'), b(3, 'Egg substitute, powder'), b(4, 'Candies, with egg'),
+    prod(15, 'Cheerios', 'General Mills'), b(5, 'Cereals ready-to-eat, GENERAL MILLS, CHEERIOS')
+  ];
+  const plain = foods.searchLocal('egg', { builtin: pool, plainFirst: true });
+  assert.equal(plain[0].name, 'Egg, whole, raw, fresh', 'the everyday form leads');
+  assert.equal(plain[1].source, 'pack', 'then the best other result');
+  assert.equal(plain[2].source, 'builtin');
+  assert.ok(plain.findIndex((f) => f.name === 'Candies, with egg') > 4, 'a food that merely mentions the word is not promoted');
+  const off = foods.searchLocal('egg', { builtin: pool });
+  assert.equal(off[0].source, 'pack', 'without plainFirst the order is the score order');
+  const brand = foods.searchLocal('cheerios', { builtin: pool, plainFirst: true });
+  assert.equal(brand[0].name, 'Cheerios', 'a brand search keeps the product first');
+  const mine = { id: 'custom:1', source: 'custom', name: 'Egg', brand: 'Mine', per100: n };
+  const withLib = foods.searchLocal('egg', { library: [mine], builtin: pool, plainFirst: true });
+  assert.equal(withLib[0].id, 'custom:1', "the user's own food stays on top");
+  assert.equal(withLib[1].name, 'Egg, whole, raw, fresh');
 });
 
 globalThis.fetch = realFetch;

@@ -431,7 +431,17 @@ svg {
   outline-offset: 2px;
 }
 
-/* Settings → Food packs list. */
+/* A search result fetching its full product (search-relay results): spinner in place of the chevron. */
+.row.is-busy {
+  cursor: progress;
+}
+
+.row.is-busy .chev .spinner {
+  width: 16px;
+  height: 16px;
+}
+
+/* Settings → Food packs list (also the Brands you use list). */
 .pack-row {
   display: flex;
   align-items: center;

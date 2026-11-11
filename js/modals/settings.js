@@ -1,7 +1,7 @@
 // MacroTally — Settings sheets: every editable setting opens in its own sheet (profile, meals, food sources,
-// food packs, Google Drive backup, weight feed, AI helper, backup, install). The Settings page itself only lists
+// food packs, brands you use, Google Drive backup, weight feed, AI helper, backup, install). The Settings page itself only lists
 // rows (js/views/settings.js); this module owns the sheets' markup and all their handlers.
-import { state, save, todayStr, exportJSON, importJSON, resetAll } from '../store.js';
+import { state, save, todayStr, exportJSON, importJSON, resetAll, removeBrand } from '../store.js';
 import { refreshExpenditure } from '../calc.js';
 import { REGIONS } from '../foods.js';
 import { esc, fmt, parseNum, icon, on, openModal, closeModal, closeAllModals, toast, requestRender, confirmDialog } from '../ui.js';
@@ -11,6 +11,7 @@ import { listPacks, importPack, removePack, setPackEnabled, loadPacks, packsLoad
 import { driveConfigured, loadGIS, connectDrive, disconnectDrive, backupNow, fetchBackup, applyBackup } from '../drive.js';
 import { syncWeightFeed, parseGistId } from '../feed.js';
 import { aiConfigured, aiUrl, normalizeUrl, testAi, DEFAULT_AI_URL } from '../ai.js';
+import { brandPackInfo, refreshBrandPack, syncBrands, clearBrandPack } from '../brandpack.js';
 
 /* ------------------------------------------------------------------ */
 /* Shared helpers (also used by the Settings list and the setup wizard) */
@@ -208,7 +209,7 @@ function mealsBody() {
     </form>`;
 }
 
-/** Bundled and imported restaurant menus (each with an on/off switch), plus the import button. */
+/** Bundled, helper and imported food packs (each with an on/off switch), plus the import button. */
 function packsBody() {
   ensurePacksLoaded();
   const packs = listPacks();
@@ -218,9 +219,9 @@ function packsBody() {
         <label class="pack-toggle"><input type="checkbox" class="switch" data-change="toggle-pack" data-id="${esc(pk.id)}" aria-label="On: ${esc(pk.name)}"${pk.enabled ? ' checked' : ''}><span>On</span></label>
         <div class="pack-main">
           <div class="pack-name">${esc(pk.name)}</div>
-          <div class="muted small">${esc(plural(pk.count, 'item'))}${pk.generated ? ` · updated ${esc(pk.generated)}` : ''}${pk.bundled ? ' · built in' : ''}</div>
+          <div class="muted small">${esc(plural(pk.count, 'item'))}${pk.generated ? ` · updated ${esc(pk.generated)}` : ''}${pk.bundled ? ' · built in' : ''}${pk.remote ? ' · from your AI helper' : ''}</div>
         </div>
-        ${pk.bundled ? '' : `<button type="button" class="btn btn-ghost btn-ghost-danger" data-action="remove-pack" data-id="${esc(pk.id)}">Remove</button>`}
+        ${pk.bundled || pk.remote ? '' : `<button type="button" class="btn btn-ghost btn-ghost-danger" data-action="remove-pack" data-id="${esc(pk.id)}">Remove</button>`}
       </div>`).join('');
   let list;
   if (packs.length) list = `<p class="muted small">${fmt(onCount)} of ${fmt(packs.length)} on</p><div class="pack-list">${rows}</div>`;
@@ -230,7 +231,45 @@ function packsBody() {
     <label class="btn btn-ghost btn-block file-btn">Import food pack
       <input class="visually-hidden" type="file" accept=".json,application/json" data-change="import-pack">
     </label>
-    <p class="hint">A pack is a JSON file of menu items (see README). Imported packs are stored on this device and included in backups. Switch off the chains you never visit to keep search results short.</p>`;
+    <p class="hint">A pack is a JSON file of menu items or packaged products (see README). Imported packs are stored on this device and included in backups. Switch off the chains you never visit to keep search results short. <strong>Popular products (US)</strong> also lets common US groceries scan without a connection.</p>`;
+}
+
+/** Tracked brands as [key, record]: most logged first, then most recently logged, then by name. */
+function sortedBrands() {
+  return Object.entries(state.brands || {})
+    .filter(([, b]) => b && b.name)
+    .sort(([, a], [, b]) => (Number(b.n) || 0) - (Number(a.n) || 0) || String(b.last || '').localeCompare(String(a.last || '')) || String(a.name).localeCompare(String(b.name)));
+}
+
+/** "14 brands · 3,420 products · updated 2 days ago", or the no-pack-yet line. */
+function brandPackLine(count) {
+  const info = brandPackInfo();
+  if (!info) return 'No pack yet. It is built on the helper within a day of logging a branded product.';
+  const when = info.generated && Number.isFinite(Date.parse(info.generated)) ? ` · updated ${relativeTime(info.generated)}` : '';
+  return `${plural(count, 'brand')} · ${plural(info.count, 'product')}${when}`;
+}
+
+/** "Brands you use": the brands of the packaged foods you log, sent to the AI helper, which builds a pack of their products. */
+function brandsBody() {
+  if (!aiConfigured(state)) {
+    return '<p class="muted small">This needs the AI helper (Settings → AI helper). With it set up, the brands of the packaged foods you log are sent to your helper, which builds a pack of their products for search and offline scanning.</p>';
+  }
+  const brands = sortedBrands();
+  const rows = brands.map(([key, b]) => `
+      <div class="pack-row">
+        <div class="pack-main">
+          <div class="pack-name">${esc(b.name)}</div>
+          <div class="muted small">${esc(plural(Number(b.n) || 0, 'log'))}</div>
+        </div>
+        <button type="button" class="icon-btn" data-action="remove-brand" data-key="${esc(key)}" aria-label="Remove ${esc(b.name)}">${icon('close')}</button>
+      </div>`).join('');
+  return `
+    <p class="muted small">${esc(brandPackLine(brands.length))}</p>
+    ${brands.length
+      ? `<div class="pack-list">${rows}</div>`
+      : '<p class="muted small">No brands yet. Log a packaged food (scanned, searched or from a pack) and its brand shows here.</p>'}
+    <button type="button" class="btn btn-ghost btn-block" data-action="brand-pack-check">Check for a new pack</button>
+    <p class="hint">Brand names you log (with how often you logged them) are sent to your own AI helper so it can bundle their products into the <strong>Brands you use</strong> pack, which you can switch off in Food packs. Remove a brand with × to stop tracking it.</p>`;
 }
 
 function installBody() {
@@ -322,7 +361,7 @@ function aiBody() {
         ${on ? '<button type="button" class="btn btn-ghost btn-block" data-action="ai-copy-secret">Copy secret</button>' : ''}
         ${on && typeof navigator !== 'undefined' && typeof navigator.share === 'function' ? '<button type="button" class="btn btn-ghost btn-block" data-action="ai-share-secret">Share secret…</button>' : ''}
       </div>
-      <p class="hint">Runs Claude on the owner's server; see the README to run your own. Clear the secret and save to turn it off.${on ? ' Copy or share the secret to set up another phone: it only needs the secret.' : ''}</p>
+      <p class="hint">Runs Claude on the owner's server; see the README to run your own. Clear the secret and save to turn it off.${on ? ' Copy or share the secret to set up another phone: it only needs the secret.' : ''} Brand names you log are sent to your own helper so it can bundle their products (Settings → Brands you use).</p>
     </form>`;
 }
 
@@ -347,6 +386,7 @@ const SHEETS = {
   meals: { title: 'Meals', body: mealsBody },
   sources: { title: 'Food sources', body: sourcesBody },
   packs: { title: 'Food packs', body: packsBody },
+  brands: { title: 'Brands you use', body: brandsBody },
   drive: { title: 'Google Drive backup', body: driveBody },
   feed: { title: 'Weight feed', body: feedBody },
   ai: { title: 'AI helper', body: aiBody },
@@ -374,7 +414,7 @@ function sheetHtml(kind) {
 
 /**
  * Open one setting's sheet.
- * @param {string} kind profile | meals | sources | packs | drive | feed | ai | backup | install
+ * @param {string} kind profile | meals | sources | packs | brands | drive | feed | ai | backup | install
  * @returns {HTMLElement|null} backdrop
  */
 export function openSetting(kind) {
@@ -577,10 +617,37 @@ on('toggle-pack', (el) => {
   refreshSettingSheets();
 });
 
+on('remove-brand', async (el) => {
+  const key = el.dataset.key;
+  const b = state.brands && state.brands[key];
+  if (!b) return;
+  const ok = await confirmDialog(`Stop tracking ${b.name}? It is no longer sent to your helper, and its products leave the Brands you use pack when the helper rebuilds it. Logging it again will not bring it back.`, { okLabel: 'Remove', danger: true });
+  if (!ok) return;
+  removeBrand(key);
+  toast(`Removed ${b.name}`);
+  requestRender();
+  refreshSettingSheets();
+});
+
+on('brand-pack-check', async (el) => {
+  el.disabled = true;
+  el.textContent = 'Checking…';
+  await syncBrands();
+  const r = await refreshBrandPack({ force: true });
+  const info = brandPackInfo();
+  if (r === 'updated') toast(`Pack updated: ${plural(info ? info.count : 0, 'product')}`);
+  else if (r === 'unchanged') toast('No new pack yet');
+  else if (r === 'none') toast('No pack yet. The helper builds it within a day of logging a branded product.', { ms: 4000 });
+  else toast("Couldn't reach the helper. Try again later.", { kind: 'error' });
+  requestRender();
+  refreshSettingSheets();
+});
+
 on('erase-all', async () => {
   const ok = await confirmDialog('Erase all data on this device? Export a backup first if you might want it later.', { okLabel: 'Erase everything', danger: true });
   if (!ok) return;
   resetAll();
+  await clearBrandPack();
   closeAllModals();
   location.reload();
 });
@@ -727,11 +794,17 @@ on('save-ai', (form) => {
     }
     if (url === DEFAULT_AI_URL) url = '';
   }
-  if (url !== a.url || secret !== a.secret) Object.assign(a, { url, secret, lastOk: null, lastError: null });
+  if (url !== a.url || secret !== a.secret) {
+    Object.assign(a, { url, secret, lastOk: null, lastError: null });
+    // Another helper (or account): send the brand list and check its pack again.
+    Object.assign(state.brandSync, { sent: '', sentAt: null, packCheckedAt: null });
+  }
   save();
   toast('AI helper saved');
   closeSheetOf(form);
   requestRender();
+  // Brands you use: send the brand list and fetch the helper's pack now (both silent, never reject).
+  syncBrands().then(() => refreshBrandPack()).then((r) => { if (r === 'updated') requestRender(); });
 });
 
 /** Saved secret, or '' when the helper is off. */

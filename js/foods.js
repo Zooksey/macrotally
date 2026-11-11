@@ -331,7 +331,10 @@ export async function lookupBarcode(code, { usdaKey = '' } = {}) {
 
 /**
  * Search Open Food Facts and, when usdaKey is given, USDA FoodData Central in parallel, with details.
- * - The Open Food Facts request is retried once after retryDelayMs on a network error or HTTP 429/503.
+ * - Open Food Facts: with relayUrl (pass aiUrl(state)), the helper's search relay `GET {relayUrl}/v1/search` is
+ *   tried first (6 s, no retry; its foods carry `_partial: true`, as the relay sends no serving sizes). On any
+ *   failure of it, or without relayUrl, the legacy cgi search runs, retried once after retryDelayMs on a network
+ *   error or HTTP 429/503. A relay that answers 401/404 (an older helper) is skipped for 10 minutes.
  * - onPartial(foods, { source }) is called when the first source answers while the other is still pending
  *   (only with a USDA key, and only when that source succeeded), so a caller can show it right away.
  * - A source's failure is swallowed as long as the search produced foods; `failed` lists it ('off' | 'usda').
@@ -346,17 +349,18 @@ export async function lookupBarcode(code, { usdaKey = '' } = {}) {
  * - Live USDA results that duplicate a loaded built-in food (same `usda:<fdcId>` id) are dropped.
  * - Searches where every request answered are cached for the session (with their correction).
  * @param {string} query
- * @param {{usdaKey?:string, region?:string, onPartial?:Function, retryDelayMs?:number}} [opts] usdaKey: pass effectiveUsdaKey()
+ * @param {{usdaKey?:string, region?:string, onPartial?:Function, retryDelayMs?:number, relayUrl?:string}} [opts] usdaKey: pass effectiveUsdaKey()
  * @returns {Promise<{foods: object[], failed: string[], corrected: string|null, correctedQuery: string|null, fuzzy: object|null}>}
  */
-export async function searchFoodsDetailed(query, { usdaKey = '', region = 'world', onPartial = null, retryDelayMs = OFF_RETRY_DELAY_MS } = {}) {
+export async function searchFoodsDetailed(query, { usdaKey = '', region = 'world', onPartial = null, retryDelayMs = OFF_RETRY_DELAY_MS, relayUrl = '' } = {}) {
   const asked = String(query || '').trim();
   if (asked.length < 2) return { foods: [], failed: [], corrected: null, correctedQuery: null, fuzzy: null };
   // A brand that is commonly typed the way it sounds is searched under its real spelling.
   const alias = brandAlias(asked);
   const q = alias ? alias.query : asked;
   const key = String(usdaKey || '').trim();
-  const cacheKey = `${region}|${key ? 'u' : '-'}|${q.toLowerCase()}`;
+  const relay = relayBase(relayUrl);
+  const cacheKey = `${region}|${key ? 'u' : '-'}|${relay ? 'r' : '-'}|${q.toLowerCase()}`;
   let builtinIds = null;
   const visible = (list) => {
     if (!builtinIds) builtinIds = new Set(builtinFoods().map((f) => f.id));
@@ -367,7 +371,7 @@ export async function searchFoodsDetailed(query, { usdaKey = '', region = 'world
     const partial = typeof onPartial === 'function'
       ? (foods, info) => { try { onPartial(visible(foods), info); } catch { /* a caller's render error must not break the search */ } }
       : null;
-    r = await searchFoodsUncached(q, { key, region, retryDelayMs, onPartial: partial });
+    r = await searchFoodsUncached(q, { key, region, retryDelayMs, onPartial: partial, relayUrl: relay });
     if (r.complete) {
       if (searchCache.size >= 60) searchCache.delete(searchCache.keys().next().value);
       searchCache.set(cacheKey, r);
@@ -422,17 +426,72 @@ export async function searchFoods(query, opts = {}) {
   return (await searchFoodsDetailed(query, opts)).foods;
 }
 
-/** Session cache of search results, keyed by region + key presence + query, so retyping costs no request. */
+/** Session cache of search results, keyed by region + key presence + relay presence + query, so retyping costs no request. */
 const searchCache = new Map();
 
 const asError = (e) => (e instanceof Error ? e : new Error(String(e)));
 
-/** Open Food Facts text search (retried once on a network error or 429/503). Resolves to Foods. */
-function offSearch(q, region, retryDelayMs) {
+/** Timeout of one search-relay request (no retries: the legacy search is the fallback). */
+const RELAY_TIMEOUT_MS = 6000;
+/** How long a relay that answered 401/404 (a helper without the search relay) is skipped. */
+const RELAY_SKIP_MS = 10 * 60 * 1000;
+/** Relay base → time until which it is skipped (session only). */
+const relaySkipUntil = new Map();
+
+/** Relay base without trailing slashes, or '' when none. */
+const relayBase = (url) => String(url || '').trim().replace(/\/+$/, '');
+
+/**
+ * Text search through the helper's public search relay (`GET {relay}/v1/search?q=&region=`, no Authorization).
+ * One attempt with a 6 s timeout. Throws on any failure (network, non-200, unreadable JSON); a 401/404 (an older
+ * helper without the relay) also skips this relay for 10 minutes. Products carry no serving sizes, so each Food is
+ * marked `_partial: true` (opening one fetches the full product by barcode).
+ */
+async function relaySearch(base, q, region) {
+  const url = `${base}/v1/search?q=${encodeURIComponent(q)}&region=${encodeURIComponent(String(region || 'world'))}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), RELAY_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(url, { signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (res.status === 401 || res.status === 404) {
+    relaySkipUntil.set(base, Date.now() + RELAY_SKIP_MS);
+    throw new Error(`search relay unavailable (HTTP ${res.status})`);
+  }
+  if (res.status !== 200) throw new Error(`search relay HTTP ${res.status}`);
+  const d = await res.json();
+  if (!d || !Array.isArray(d.products)) throw new Error('search relay: unexpected reply');
+  const out = [];
+  for (const p of d.products) {
+    if (!p || !(p.product_name || p.product_name_en)) continue;
+    const f = foodFromOFF(p);
+    if (!f) continue;
+    if (p.partial !== false) f._partial = true;
+    out.push(f);
+  }
+  return out;
+}
+
+/**
+ * Open Food Facts text search. With a relay address (the AI helper's, see aiUrl) the helper's search relay is
+ * asked first; on ANY failure of it, or without a relay, the legacy cgi search runs (retried once on a network
+ * error or 429/503). Resolves to Foods.
+ */
+async function offSearch(q, region, retryDelayMs, relayUrl = '') {
+  const base = relayBase(relayUrl);
+  if (base && !((relaySkipUntil.get(base) || 0) > Date.now())) {
+    try {
+      return await relaySearch(base, q, region);
+    } catch {
+      // Fall through to the legacy search.
+    }
+  }
   const url = `${offSearchBase(region)}/cgi/search.pl?search_terms=${encodeURIComponent(q)}&search_simple=1&action=process&json=1&page_size=25&sort_by=unique_scans_n&fields=${OFF_FIELDS}`;
-  return fetchJSON(url, 'Open Food Facts', { retries: 2, retryDelayMs }).then((d) =>
-    (d?.products || []).filter((p) => p && (p.product_name || p.product_name_en)).map(foodFromOFF).filter(Boolean)
-  );
+  const d = await fetchJSON(url, 'Open Food Facts', { retries: 1, retryDelayMs });
+  return (d?.products || []).filter((p) => p && (p.product_name || p.product_name_en)).map(foodFromOFF).filter(Boolean);
 }
 
 /** USDA FoodData Central search (Foundation, SR Legacy, Branded). Resolves to Foods. */
@@ -443,8 +502,8 @@ function usdaSearch(q, key) {
   ).then((d) => (d?.foods || []).map(foodFromUSDA).filter(Boolean));
 }
 
-async function searchFoodsUncached(q, { key, region, retryDelayMs, onPartial }) {
-  const offP = offSearch(q, region, retryDelayMs);
+async function searchFoodsUncached(q, { key, region, retryDelayMs, onPartial, relayUrl }) {
+  const offP = offSearch(q, region, retryDelayMs, relayUrl);
   const usdaP = key ? usdaSearch(q, key) : Promise.resolve([]);
   if (onPartial && key) {
     // Whichever source settles first: report it if it succeeded (the other is still pending).
@@ -467,7 +526,7 @@ async function searchFoodsUncached(q, { key, region, retryDelayMs, onPartial }) 
   let complete = !failed.length;
   let fix = null;
   if (key && usda.status === 'fulfilled') {
-    fix = await secondChance(q, [...seen.values()], { key, region, retryDelayMs });
+    fix = await secondChance(q, [...seen.values()], { key, region, retryDelayMs, relayUrl });
     if (fix) {
       add(fix.foods);
       if (!fix.complete) complete = false;
@@ -499,7 +558,7 @@ function plainWords(s) {
  * The spelling second chance of searchFoodsUncached. Returns null when it does not apply (no request made),
  * else { foods, corrected, correctedQuery, fuzzy, complete } (corrected null when nothing close was found).
  */
-async function secondChance(q, found, { key, region, retryDelayMs }) {
+async function secondChance(q, found, { key, region, retryDelayMs, relayUrl }) {
   const words = plainWords(q);
   const toks = words.map(stem);
   if (!toks.length || found.some((f) => fullyMatches(q, f))) return null;
@@ -546,7 +605,7 @@ async function secondChance(q, found, { key, region, retryDelayMs }) {
   let complete = true;
   let offFoods = [];
   try {
-    offFoods = await offSearch(correctedQuery, region, retryDelayMs);
+    offFoods = await offSearch(correctedQuery, region, retryDelayMs, relayUrl);
   } catch {
     complete = false; // ignored, but then not cached, so the next search can fill it in
   }
@@ -670,6 +729,27 @@ function queryTokens(query) {
   return lastQueryTokens;
 }
 
+/**
+ * One-entry memo of the strings a fuzzy-scored query can match at all: its tokens, their synonyms, their fuzzy
+ * alternatives and the alternatives' synonyms. A food whose token text contains none of them scores 0, so the
+ * typo pass over ~40k foods rejects most of them with a few substring tests.
+ */
+let lastNeedles = { query: null, fuzzy: null, list: [] };
+function fuzzyNeedles(query, q, fuzzy) {
+  if (lastNeedles.query !== query || lastNeedles.fuzzy !== fuzzy) {
+    const set = new Set();
+    for (const t0 of q) {
+      const fz = fuzzyAlts(fuzzy, t0) || [];
+      for (const t of [t0, ...fz]) {
+        set.add(t);
+        for (const syn of SYNONYMS[t] || []) set.add(syn);
+      }
+    }
+    lastNeedles = { query, fuzzy, list: [...set] };
+  }
+  return lastNeedles.list;
+}
+
 /** Per-food token cache (keyed by object; food objects are not mutated while listed). */
 const tokenCache = new WeakMap();
 
@@ -701,6 +781,8 @@ function foodTokens(food) {
  * - Length: −0.05 per name token beyond 6, so long USDA descriptions rank below short names at equal match.
  * - Popularity: +0.8 × log10(1 + food.pop) (Open Food Facts scan count); +1.5 for built-in and
  *   food-pack foods (curated); +3 for library foods (id in localIds), +2 more for favorites, +1 more for recents.
+ *   (Current values: +2 curated for built-in and restaurant-pack foods, which skip the −0.5 per unmatched name word
+ *   that live results pay; product-pack foods (`food.product`) get +2 with that cost capped at 1.5.)
  * - Partial match (some query tokens missed): the total is multiplied by 0.25, so a typo in one word
  *   still surfaces the food, well below full matches.
  * - Fuzzy (only with opts.fuzzy, a map query token → alternative tokens, see fuzzyMap): a query token with
@@ -722,6 +804,11 @@ export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new
   // minus a small cost per corrected word. So "chiken brest" ranks foods in the same order as "chicken breast".
   let corrected = 0;
   if (fuzzy) {
+    // Fast reject (same result as the check below, before the per-word swaps).
+    const needles = fuzzyNeedles(query, q, fuzzy);
+    let any = false;
+    for (let i = 0; i < needles.length; i++) if (text.includes(needles[i])) { any = true; break; }
+    if (!any) return 0;
     q = q.map((t0) => {
       const fz = fuzzyAlts(fuzzy, t0);
       if (!fz) return t0;
@@ -768,14 +855,23 @@ export function scoreFood(query, food, { localIds = new Set(), favoriteIds = new
   // Live results: each name word the query did not touch costs a little ("chicken breast sandwich"
   // ranks under "chicken breast"). Built-in USDA names carry structured descriptors, so they are exempt
   // and get a flat curated bonus instead (restaurant pack menus too).
-  if (food.source === 'builtin' || food.source === 'pack') {
+  // Packaged products from a `kind: 'products'` pack (food.product) are real branded items whose names carry
+  // flavour / size / line words the query rarely repeats: they get the curated bonus too, and the per-word cost is
+  // capped at 1.5 so a long product name is not buried, while "chicken breast" still beats "chicken breast bites".
+  if (food.source === 'builtin' || (food.source === 'pack' && !food.product)) {
     score += 2;
   } else {
     const unmatched = name.filter((w) => !q.some((t) => w.startsWith(t) || w.includes(t))).length;
-    score -= 0.5 * unmatched;
+    if (food.source === 'pack') score += 2 - Math.min(1.5, 0.5 * unmatched);
+    else score -= 0.5 * unmatched;
   }
   const pop = Number(food.pop);
   if (pop > 0) score += Math.log10(1 + pop) * 0.6;
+  // A search that is just a brand ("siggis", "fairlife"): products OF that brand are what is wanted, whatever
+  // they are called ("Vanilla" by siggi's), ahead of entries that merely have the brand as their name.
+  if (brand.length && q.every((t) => brand.includes(t))) score += 6;
+  // Relay results are unreviewed database rows without a serving: a sparse one (no brand) ranks lower still.
+  if (food._partial) score -= brand.length ? 1.5 : 3;
   if (localIds.has(food.id)) score += 3;
   if (favoriteIds.has(food.id)) score += 2;
   if (recentIds.has(food.id)) score += 1;
@@ -793,34 +889,117 @@ function dedupKey(food) {
 }
 
 /**
+ * Which copy of one product (same barcode) to keep: the library's, then a pack's or the built-in list's, then a
+ * full live result, then a `_partial` live result (search relay, no servings yet).
+ */
+function copyRank(food, localIds) {
+  if (food._partial) return 0; // never the library's copy (saveFood strips the flag), even when it shares its id
+  if (localIds.has(food.id)) return 3;
+  return food.source === 'pack' || food.source === 'builtin' ? 2 : 1;
+}
+
+/**
  * Rank and de-duplicate a mixed list of foods (library, built-in, USDA, Open Food Facts) for a query.
  * Sorted by scoreFood, best first (ties keep input order). Foods sharing an id or a de-duplication key
- * (barcode, else normalized name + brand) keep only the higher-scored one. Foods scoring 0 are kept,
- * sorted last, because live sources also match on fields we do not see. Never throws on odd input.
+ * (barcode, else normalized name + brand) keep only the higher-scored one, except that among copies of one
+ * barcode the library copy, then a pack copy, then a full live copy wins over a `_partial` one (it takes the
+ * best-scored copy's place). Foods scoring 0 are kept, sorted last, because live sources also match on fields
+ * we do not see. Never throws on odd input.
  * @param {string} query
  * @param {object[]} foods
  * @param {{limit?: number, localIds?: Set<string>, favoriteIds?: Set<string>, recentIds?: Set<string>, fuzzy?: object|null}} [opts]
  *   fuzzy: typo alternatives passed through to scoreFood (fuzzyMap, or searchFoodsDetailed's `fuzzy`)
  * @returns {object[]} Foods, at most `limit`
  */
-export function rankFoods(query, foods, { limit = 40, localIds, favoriteIds, recentIds, fuzzy = null } = {}) {
+export function rankFoods(query, foods, { limit = 40, localIds, favoriteIds, recentIds, fuzzy = null, plainFirst = false } = {}) {
   const opts = { localIds: localIds || new Set(), favoriteIds: favoriteIds || new Set(), recentIds: recentIds || new Set(), fuzzy };
   const scored = (Array.isArray(foods) ? foods : [])
     .filter((f) => f && typeof f === 'object' && f.id)
     .map((food, i) => ({ food, i, score: scoreFood(query, food, opts) }))
     .sort((a, b) => b.score - a.score || a.i - b.i);
+  // Preferred copy per barcode (see copyRank); ties keep the better score.
+  const keys = scored.map(({ food }) => dedupKey(food));
+  const best = new Map();
+  scored.forEach(({ food }, i) => {
+    const key = keys[i];
+    if (key[0] !== '#') return;
+    const cur = best.get(key);
+    if (!cur || copyRank(food, opts.localIds) > copyRank(cur, opts.localIds)) best.set(key, food);
+  });
   const seenIds = new Set();
   const seenKeys = new Set();
   const out = [];
-  for (const { food } of scored) {
-    const key = dedupKey(food);
-    if (seenIds.has(food.id) || seenKeys.has(key)) continue;
+  for (let i = 0; i < scored.length; i++) {
+    const key = keys[i];
+    const food = best.get(key) || scored[i].food;
+    if (seenIds.has(scored[i].food.id) || seenIds.has(food.id) || seenKeys.has(key)) continue;
+    seenIds.add(scored[i].food.id);
     seenIds.add(food.id);
     seenKeys.add(key);
     out.push(food);
-    if (out.length >= limit) break;
+    if (!plainFirst && out.length >= limit) break;
   }
-  return out;
+  return plainFirst ? plainFoodsFirst(query, out, opts).slice(0, limit) : out;
+}
+
+const STAPLE_PLUS = new Set(['raw', 'whole', 'fresh', 'cooked', 'plain', 'fluid', 'regular', 'large', 'boiled', 'roasted']);
+const STAPLE_MINUS = new Set([
+  'dried', 'dry', 'powder', 'substitute', 'flour', 'dehydrated', 'babyfood', 'frozen', 'mix', 'glutinous', 'bran',
+  'noodle', 'imitation', 'human', 'goat', 'sheep', 'buffalo', 'duck', 'goose', 'quail', 'buttermilk', 'filled',
+  'sodium', 'stabilized', 'parboiled', 'instant', 'precooked', 'canned', 'shake', 'flake', 'breaded', 'roll',
+  'tender', 'overripe', 'restaurant', 'reduced', 'unenriched'
+]);
+
+/** How everyday a built-in food's form is, from its name words (words the query itself names are neutral). */
+function stapleScore(name, queryWords) {
+  let plus = 0;
+  let minus = 0;
+  for (const w of name) {
+    if (queryWords.has(w)) continue;
+    if (STAPLE_PLUS.has(w)) plus++;
+    else if (STAPLE_MINUS.has(w)) minus++;
+  }
+  return Math.min(plus, 2) * 2 - minus * 3 - name.length * 0.2;
+}
+
+/**
+ * Generic searches ("egg", "white rice", "milk") should lead with the plain food, not with a dozen store brands
+ * and restaurant items of the same name. After the user's own foods at the top, up to three built-in (USDA
+ * generic) foods that match every query word AND are named for the food (their first name word is a query word, whole:
+ * "Rice, white, …", "Egg, whole, …") are moved up and alternated with the best other results. A built-in food
+ * that merely mentions the words ("Candies, …, with rice cereal") is left where it ranked.
+ */
+function plainFoodsFirst(query, ranked, opts) {
+  const q = tokenize(query);
+  if (!q.length) return ranked;
+  let lead = 0;
+  while (lead < ranked.length && opts.localIds.has(ranked[lead].id)) lead++;
+  const rest = ranked.slice(lead);
+  const heads = new Set(q);
+  for (const t of q) {
+    for (const s of SYNONYMS[t] || []) heads.add(s);
+    for (const a of (opts.fuzzy && fuzzyAlts(opts.fuzzy, t)) || []) heads.add(a);
+  }
+  const cands = [];
+  for (const f of rest) {
+    if (f.source !== 'builtin') continue;
+    const name = foodTokens(f).name;
+    if (!name.length || !heads.has(name[0])) continue;
+    if (!fullyMatches(query, f, { fuzzy: opts.fuzzy })) continue;
+    cands.push({ f, i: cands.length, staple: scoreFood(query, f, opts) + stapleScore(name, heads) });
+    if (cands.length >= 60) break;
+  }
+  if (!cands.length) return ranked;
+  // Among them prefer the everyday form ("Egg, whole, raw, fresh") over the specialised ("Egg, white, dried").
+  const plain = cands.sort((x, y) => y.staple - x.staple || x.i - y.i).slice(0, 3).map((c) => c.f);
+  const picked = new Set(plain);
+  const others = rest.filter((f) => !picked.has(f));
+  const merged = [];
+  for (let i = 0; i < plain.length; i++) {
+    merged.push(plain[i]);
+    if (i < others.length) merged.push(others[i]);
+  }
+  return [...ranked.slice(0, lead), ...merged, ...others.slice(plain.length)];
 }
 
 /**
@@ -834,7 +1013,7 @@ export function rankFoods(query, foods, { limit = 40, localIds, favoriteIds, rec
  *   library: state.foods (id → Food map) or an array of Foods; recents/favorites: food ids
  * @returns {object[]} Foods
  */
-export function searchLocal(query, { library = {}, builtin = [], recents = [], favorites = [], limit = 40 } = {}) {
+export function searchLocal(query, { library = {}, builtin = [], recents = [], favorites = [], limit = 40, plainFirst = false } = {}) {
   if (!tokenize(query).length) return [];
   const lib = (Array.isArray(library) ? library : Object.values(library || {}))
     .filter((f) => f && typeof f === 'object' && f.id);
@@ -846,13 +1025,13 @@ export function searchLocal(query, { library = {}, builtin = [], recents = [], f
   const pool = [...lib, ...(Array.isArray(builtin) ? builtin : [])]
     .filter((f) => f && typeof f === 'object' && f.id);
   const exact = pool.filter((f) => scoreFood(query, f, opts) > 0);
-  const ranked = rankFoods(query, exact, { ...opts, limit });
+  const ranked = rankFoods(query, exact, { ...opts, limit, plainFirst });
   // Typo fallback: only when no result matches every query word, and only for words that match nothing.
   if (ranked.some((f) => fullyMatches(query, f))) return ranked;
   const fuzzy = fuzzyMap(query, { library: lib, builtin });
   if (!fuzzy) return ranked;
   const fopts = { ...opts, fuzzy };
-  return rankFoods(query, pool.filter((f) => scoreFood(query, f, fopts) > 0), { ...fopts, limit });
+  return rankFoods(query, pool.filter((f) => scoreFood(query, f, fopts) > 0), { ...fopts, limit, plainFirst });
 }
 
 /** Whether query token t0 matches a food's name/brand tokens by scoreFood's rules (synonyms and fuzzy alternatives included). */
@@ -921,6 +1100,20 @@ function vocabOf(foods, cache = true) {
   v = { names, nameList: [...names], brandList, byFirst };
   if (cache) vocabCache.set(foods, v);
   return v;
+}
+
+/**
+ * Build and cache the typo vocabulary of a food list ahead of time (same per-array cache as fuzzyMap and
+ * searchLocal), so the first misspelt search does not pay for it. The add-food sheet calls this when the browser is
+ * idle after the first local results, when every food's tokens are already cached (then it costs ~35–60 ms for
+ * ~40k foods on a desktop). No-op when the list's vocabulary is already cached.
+ * @param {object[]} foods the same array later passed as `builtin`
+ * @returns {boolean} true when it was built now
+ */
+export function warmSearchVocabulary(foods) {
+  if (!Array.isArray(foods) || !foods.length || vocabCache.has(foods)) return false;
+  vocabOf(foods);
+  return true;
 }
 
 /** Whether token t (or a synonym) matches any food of a vocabulary by scoreFood's rules. */
