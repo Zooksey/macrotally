@@ -12,13 +12,16 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { EXPORT_URL, USER_AGENT, brandKey, buildPack, inCountry, rowToFood, selectBrands, streamExport } from './off-pack.mjs';
+import {
+  EXPORT_URL, USER_AGENT, brandKey, buildPack, createServingCollector, decodeServingIndex, encodeServingIndex,
+  inCountry, lookupServing, rowToFood, selectBrands, streamExport
+} from './off-pack.mjs';
 
 /** Server version, reported by GET /v1/health (matches the app's APP_VERSION). */
-export const VERSION = '1.8.0';
+export const VERSION = '1.8.1';
 /** Largest accepted request body (bytes). */
 export const MAX_BODY = 12 * 1024 * 1024;
 /** Longest accepted description. */
@@ -412,6 +415,22 @@ export function mapSearchHit(h) {
   };
 }
 
+/**
+ * Search products with serving data from the servings index: a product whose code is in the index gets
+ * `serving_quantity` (grams, 0.1 g) and `serving_size` ("28 g", "28.5 g"); others are returned as they are.
+ * Never mutates the input (the cached list stays bare, so a later index applies to cached searches too).
+ * @param {object[]} products mapSearchHit results
+ * @param {{codes: Float64Array, grams: Float32Array}|null} idx
+ * @returns {object[]}
+ */
+export function withServings(products, idx) {
+  if (!idx) return products;
+  return products.map((p) => {
+    const g = Math.round(lookupServing(idx, p && p.code) * 10) / 10;
+    return g > 0 ? { ...p, serving_size: `${g} g`, serving_quantity: g } : p;
+  });
+}
+
 /** Sliding one-minute window counters: one per key, plus pruning. */
 function makeLimiter(limit, windowMs = 60000) {
   const hits = new Map();
@@ -524,15 +543,20 @@ export function sameBrandSet(a, b) {
 }
 
 /**
- * Scheduler rule: build when there are brands, no build is running, the last failure is at least
- * FAIL_BACKOFF_MS old, and (there is no pack, or the pack is older than 7 days, or the brand set differs from the
- * pack's and the last attempt is more than 20 h old).
+ * Scheduler rule: build when no build is running, the last failure is at least FAIL_BACKOFF_MS old, and either
+ * the servings index is missing or older than 7 days (with or without brands), or there are brands and (there is
+ * no pack, or the pack is older than 7 days, or the brand set differs from the pack's and the last attempt is more
+ * than 20 h old).
  * @param {{brands: object[], building: boolean, pack: {generated?: string, builtAt?: string, brands?: string[]}|null,
- *   lastAttempt: number, lastBuildError: string|null, now: number}} s
+ *   index: {builtAt?: string}|null, lastAttempt: number, lastBuildError: string|null, now: number}} s
+ *   index: the servings index metadata, null when there is none
  */
-export function shouldBuild({ brands, building, pack, lastAttempt = 0, lastBuildError = null, now }) {
-  if (!brands || !brands.length || building) return false;
+export function shouldBuild({ brands, building, pack, index = null, lastAttempt = 0, lastBuildError = null, now }) {
+  if (building) return false;
   if (lastBuildError && lastAttempt && now - lastAttempt < FAIL_BACKOFF_MS) return false;
+  const indexBuilt = index ? Date.parse(index.builtAt || '') : NaN;
+  if (!Number.isFinite(indexBuilt) || now - indexBuilt > PACK_MAX_AGE_MS) return true;
+  if (!brands || !brands.length) return false;
   if (!pack) return true;
   const built = Date.parse(pack.builtAt || pack.generated || '');
   if (!Number.isFinite(built) || now - built > PACK_MAX_AGE_MS) return true;
@@ -602,7 +626,7 @@ function logLine(fields) {
  * @param {ReturnType<typeof readConfig>} cfgIn (missing fields take readConfig's defaults)
  * @param {{fetchImpl?: typeof fetch, now?: () => number, schedule?: boolean, log?: (fields: any[]) => void}} [deps]
  *   fetchImpl serves both the search relay and the export download; now drives rate limits, the cache and the
- *   build rules; schedule starts the hourly brand-pack scheduler (main() turns it on; tests leave it off).
+ *   build rules; schedule starts the hourly build scheduler (servings index and brand pack; main() turns it on; tests leave it off).
  * @returns {http.Server}
  */
 export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.now, schedule = false, log = logLine } = {}) {
@@ -622,12 +646,16 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
   const files = {
     brands: path.join(cfg.dataDir, 'brands.json'),
     pack: path.join(cfg.dataDir, 'brand-pack.json'),
-    state: path.join(cfg.dataDir, 'build-state.json')
+    state: path.join(cfg.dataDir, 'build-state.json'),
+    servings: path.join(cfg.dataDir, 'servings.idx')
   };
   let dataOk = probeDataDir(cfg.dataDir);
   let dataCheckedAt = now();
   let brands = [];
   let packMeta = null;
+  /** Servings index (barcode -> serving grams) for the search relay, and its {count, builtAt}; null when absent. */
+  let servings = null;
+  let servingsMeta = null;
   let building = false;
   let lastAttempt = 0;
   let lastBuildError = null;
@@ -645,6 +673,24 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
       lastAttempt = Number(st.lastAttempt) || 0;
       lastBuildError = typeof st.lastBuildError === 'string' ? st.lastBuildError : null;
     }
+    // A missing or corrupt index file is ignored (the scheduler then builds a new one).
+    let buf = null;
+    let mtimeMs = 0;
+    try {
+      buf = readFileSync(files.servings);
+      mtimeMs = statSync(files.servings).mtimeMs;
+    } catch {
+      buf = null;
+    }
+    const idx = buf ? decodeServingIndex(buf) : null;
+    if (idx) {
+      const saved = st && st.servings && typeof st.servings.builtAt === 'string' && Number.isFinite(Date.parse(st.servings.builtAt))
+        ? st.servings.builtAt : null;
+      servings = idx;
+      servingsMeta = { count: idx.codes.length, builtAt: saved || new Date(mtimeMs).toISOString() };
+    } else if (buf) {
+      log(['servings index', files.servings, 'is not readable: ignored']);
+    }
   };
   if (dataOk) loadData();
   else log(['data dir', cfg.dataDir, 'is missing or not writable: brand endpoints answer 503']);
@@ -657,8 +703,12 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
     if (dataOk) loadData();
     return dataOk;
   };
-  const saveState = () => writeAtomic(files.state, JSON.stringify({ lastAttempt, lastBuildError })).catch(() => {});
+  const saveState = () => writeAtomic(files.state, JSON.stringify({ lastAttempt, lastBuildError, servings: servingsMeta })).catch(() => {});
 
+  /**
+   * One pass over the export: always the servings index (every country), plus the brand pack when there are
+   * brands. Without brands no row is split (only the code and serving_quantity cells are read).
+   */
   async function runBuild() {
     building = true;
     lastAttempt = now();
@@ -668,31 +718,43 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
     const wanted = new Set(names.map(brandKey).filter(Boolean));
     const country = cfg.packCountry;
     const foods = [];
+    const collector = createServingCollector();
     try {
       const { rows } = await streamExport({
         url: cfg.exportUrl,
         fetchImpl,
         signal: buildAbort.signal,
+        servings: collector,
         lineFilter: country ? (line) => line.includes(country) : undefined,
-        onRow: (cols, idx) => {
+        onRow: names.length ? (cols, idx) => {
           if (!inCountry(cols[idx.code], cols[idx.countries_tags], country)) return;
           const tags = `${cols[idx.brands_tags] ?? ''},${cols[idx.brands] ?? ''}`;
           if (!tags.split(',').some((t) => wanted.has(brandKey(t)))) return;
           const f = rowToFood(cols, idx);
           if (f) foods.push(f);
-        }
+        } : undefined
       });
-      const selected = selectBrands(foods, names);
-      const pack = {
-        ...buildPack({ id: 'my-brands', name: 'Brands you use', foods: selected, source: 'https://world.openfoodfacts.org', now: now() }),
-        brands: names,
-        builtAt: new Date(now()).toISOString()
-      };
-      await writeAtomic(files.pack, JSON.stringify(pack));
-      packMeta = { generated: pack.generated, builtAt: pack.builtAt, foods: selected.length, brands: names };
-      packCache = null;
+      const idx = collector.finish();
+      const builtAt = new Date(now()).toISOString();
+      await writeAtomic(files.servings, encodeServingIndex(idx));
+      servings = idx;
+      servingsMeta = { count: idx.codes.length, builtAt };
+      if (names.length) {
+        const selected = selectBrands(foods, names);
+        const pack = {
+          ...buildPack({ id: 'my-brands', name: 'Brands you use', foods: selected, source: 'https://world.openfoodfacts.org', now: now() }),
+          brands: names,
+          builtAt
+        };
+        await writeAtomic(files.pack, JSON.stringify(pack));
+        packMeta = { generated: pack.generated, builtAt: pack.builtAt, foods: selected.length, brands: names };
+        packCache = null;
+        log(['brand-pack built', `rows=${rows}`, `matched=${foods.length}`, `foods=${selected.length}`, `brands=${names.length}`,
+          `servings=${idx.codes.length}`, `${((Date.now() - t0) / 1000).toFixed(0)}s`]);
+      } else {
+        log(['servings index built', `rows=${rows}`, `servings=${idx.codes.length}`, `${((Date.now() - t0) / 1000).toFixed(0)}s`]);
+      }
       lastBuildError = null;
-      log(['brand-pack built', `rows=${rows}`, `matched=${foods.length}`, `foods=${selected.length}`, `brands=${names.length}`, `${((Date.now() - t0) / 1000).toFixed(0)}s`]);
     } catch (err) {
       lastBuildError = String((err && err.message) || err).slice(0, 300);
       log(['brand-pack build failed', `${((Date.now() - t0) / 1000).toFixed(0)}s`, lastBuildError]);
@@ -708,7 +770,7 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
     return true;
   };
   const tick = () => {
-    if (haveData() && shouldBuild({ brands, building, pack: packMeta, lastAttempt, lastBuildError, now: now() })) startBuild();
+    if (haveData() && shouldBuild({ brands, building, pack: packMeta, index: servingsMeta, lastAttempt, lastBuildError, now: now() })) startBuild();
     ipLimiter.prune(now());
   };
 
@@ -773,7 +835,7 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
       const hit = cache.get(key, t);
       if (hit) {
         info.extra.push(`hits=${hit.length}`, 'cached');
-        send(200, { products: hit, source: 'search-a-licious', cached: true }, { 'Cache-Control': 'public, max-age=3600' });
+        send(200, { products: withServings(hit, servings), source: 'search-a-licious', cached: true }, { 'Cache-Control': 'public, max-age=3600' });
         return;
       }
       let job = inflight.get(key);
@@ -787,9 +849,10 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
       }
       try {
         const products = await job;
+        // The cache keeps the bare hits; serving data is added per response, so a newer index applies at once.
         cache.set(key, products, now());
         info.extra.push(`hits=${products.length}`);
-        send(200, { products, source: 'search-a-licious', cached: false }, { 'Cache-Control': 'public, max-age=3600' });
+        send(200, { products: withServings(products, servings), source: 'search-a-licious', cached: false }, { 'Cache-Control': 'public, max-age=3600' });
       } catch (err) {
         info.extra.push(`err=${String((err && err.message) || err).slice(0, 80).replace(/\s+/g, '_')}`);
         send(502, { error: 'upstream' });
@@ -810,6 +873,7 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
         model: cfg.model,
         brands: brands.length,
         pack: packMeta ? { generated: packMeta.generated, foods: packMeta.foods, brands: packMeta.brands } : null,
+        servings: servingsMeta ? { count: servingsMeta.count, builtAt: servingsMeta.builtAt } : null,
         building,
         lastBuildError
       });
@@ -882,10 +946,7 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
         send(200, { started: false, running: true });
         return;
       }
-      if (!brands.length) {
-        send(409, { error: 'no brands' });
-        return;
-      }
+      // Without brands the build makes only the servings index.
       startBuild();
       send(202, { started: true });
       return;
@@ -965,7 +1026,10 @@ export function createServer(cfgIn, { fetchImpl = globalThis.fetch, now = Date.n
     buildAbort.abort(new Error('server closed'));
   });
   /** For tests and diagnostics: run the scheduler rule once now; current build state. */
-  server.helper = { tick, status: () => ({ building, lastBuildError, lastAttempt, brands: brands.length, pack: packMeta, dataOk }) };
+  server.helper = {
+    tick,
+    status: () => ({ building, lastBuildError, lastAttempt, brands: brands.length, pack: packMeta, servings: servingsMeta, dataOk })
+  };
   return server;
 }
 

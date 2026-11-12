@@ -36,7 +36,7 @@ Copy `.env.example` to `.env` next to it and fill in:
 - Optional: `AI_MODEL` (default `sonnet`), `ALLOWED_ORIGINS` (where the app is hosted; default
   `https://zooksey.github.io,http://localhost:8766,http://127.0.0.1:8766`), `PORT` (8787), `AI_TIMEOUT_MS`
   (85000), `AI_MAX_TURNS` (10).
-- Optional, for search and the brand pack: `DATA_DIR` (`/data`, where the brand list and pack are saved; the
+- Optional, for search and the brand pack: `DATA_DIR` (`/data`, where the brand list, pack and servings index are saved; the
   Dockerfile sets it), `SEARCH_RATE_PER_MIN` (30 searches per minute per client IP; all clients together are
   also capped at 120 Open Food Facts calls per minute), `EXPORT_URL` (the Open Food Facts export,
   `https://static.openfoodfacts.org/data/en.openfoodfacts.org.products.csv.gz`), `PACK_COUNTRY`
@@ -67,7 +67,7 @@ Check it from the Unraid shell:
 
 ```sh
 curl -H "Authorization: Bearer $AI_SECRET" http://localhost:8787/v1/health
-# {"ok":true,"version":"1.8.0","model":"sonnet","brands":0,"pack":null,"building":false,"lastBuildError":null}
+# {"ok":true,"version":"1.8.1","model":"sonnet","brands":0,"pack":null,"servings":null,"building":false,"lastBuildError":null}
 ```
 
 `docker compose logs -f` in that folder (or the container's log in the Unraid UI) shows one line per request: time, status,
@@ -118,8 +118,9 @@ All responses are JSON. Every request except `OPTIONS` and `GET /v1/search` need
 `Authorization: Bearer <AI_SECRET>` (else 401 `{"error":"bad secret"}`).
 
 - `GET /v1/health` →
-  `{"ok":true,"version":"1.8.0","model":"sonnet","brands":12,"pack":{"generated":"2026-11-11","foods":2140,"brands":["Kellogg's","Fairlife"]},"building":false,"lastBuildError":null}`
-  (`pack` is `null` until the first brand pack is built).
+  `{"ok":true,"version":"1.8.1","model":"sonnet","brands":12,"pack":{"generated":"2026-11-11","foods":2140,"brands":["Kellogg's","Fairlife"]},"servings":{"count":1850000,"builtAt":"2026-11-11T08:02:00.000Z"},"building":false,"lastBuildError":null}`
+  (`pack` is `null` until the first brand pack is built, `servings` is `null` until the first servings index is
+  built).
 - `POST /v1/food` with
   `{ "text": "71g of these", "images": [{ "data": "<base64, no data: prefix>", "mime": "image/jpeg" }, ...] }`
   (text up to 2000 characters; up to 4 images, each up to 4 MB of base64, `mime` `image/jpeg` or `image/png`;
@@ -137,7 +138,10 @@ All responses are JSON. Every request except `OPTIONS` and `GET /v1/search` need
   "brands":"Kellogg's","nutriments":{"energy-kcal_100g":375,"proteins_100g":7.5,"carbohydrates_100g":87.5,
   "fat_100g":0},"unique_scans_n":5,"partial":true}, ...],"source":"search-a-licious","cached":false}`
   (up to 25 products, only those with a barcode and a name; a nutriment key is present only when Open Food Facts
-  has it; `partial` because there is no serving size, the app looks the barcode up for that).
+  has it). The search service sends no serving sizes, so the server adds them from its servings index (see
+  below): a product found there also has `"serving_size":"28 g","serving_quantity":28`, so the app can show
+  calories per serving; others have neither. `partial` stays true either way: the app still looks the barcode up
+  for the full label.
   `q` is 2 to 100 characters (else 400 `{"error":"bad query"}`). `region` (`us`, `ca`, `gb`/`uk`, `ie`, `au`,
   `nz`, `fr`, `de`, `es`, `it`) limits results to products sold there; anything else means worldwide.
   The words are passed on as plain text (query syntax such as `field:` or quotes is removed).
@@ -150,11 +154,14 @@ All responses are JSON. Every request except `OPTIONS` and `GET /v1/search` need
   (429 `{"error":"rate limited"}`), answers are cached in memory for 6 hours (500 searches) and sent with
   `Cache-Control: public, max-age=3600`. An Open Food Facts failure or an 8 s timeout is 502 `{"error":"upstream"}`.
 
-### Brands you use (secret required)
+### Brands you use and the servings index (secret required)
 
 The app sends the brands you log most; the server builds a food pack of those brands' US products from the
 Open Food Facts export (a ~1.5 GB file, streamed and never stored; a build takes several minutes and the server
-keeps answering meanwhile). Files in `DATA_DIR`: `brands.json`, `brand-pack.json`, `build-state.json`.
+keeps answering meanwhile). The same pass also builds the servings index used by the search relay: the serving
+size in grams of every product in the export (all countries) that has one, keyed by barcode (about 12 bytes per
+product, in memory and on disk). Files in `DATA_DIR`: `brands.json`, `brand-pack.json`, `build-state.json`,
+`servings.idx` (the index; a missing or unreadable file is ignored and rebuilt).
 
 - `PUT /v1/brands` with `{"brands":[{"name":"Kellogg's","n":14},{"name":"Fairlife","n":9}]}` (at most 300 brands,
   names up to 60 characters, `n` = how often you logged it; body up to 64 KB) replaces the saved list
@@ -164,11 +171,12 @@ keeps answering meanwhile). Files in `DATA_DIR`: `brands.json`, `brand-pack.json
   barcode `bc` and brand `b`; up to 1500 products per brand and 20000 in all) with an `ETag`; send it back as
   `If-None-Match` to get 304 when nothing changed. 404 `{"error":"no pack yet"}` before the first build.
 - `POST /v1/brand-pack/rebuild` → 202 `{"started":true}`, or 200 `{"started":false,"running":true}` when a build
-  is already running, or 409 `{"error":"no brands"}` when no brands are saved.
-- Automatic builds: checked 2 minutes after start and then hourly. A build runs when brands are saved and none is
-  running, and there is no pack yet, or the pack is more than 7 days old, or the brand list changed and the last
-  attempt was more than 20 hours ago. After a failed build (`lastBuildError` in health) the next try waits at
-  least 6 hours.
+  is already running. With no brands saved the build makes only the servings index (no pack).
+- Automatic builds: checked 2 minutes after start and then hourly. A build runs when none is running and either
+  there is no servings index or it is more than 7 days old (brands or not), or brands are saved and there is no
+  pack yet, or the pack is more than 7 days old, or the brand list changed and the last attempt was more than
+  20 hours ago. Every build writes a new servings index; it writes the pack only when brands are saved. After a
+  failed build (`lastBuildError` in health) the next try waits at least 6 hours.
 - Without a writable `DATA_DIR` these endpoints answer 503 `{"error":"no data dir"}`; search and AI still work.
 
 ## Running it on a PC (for development)

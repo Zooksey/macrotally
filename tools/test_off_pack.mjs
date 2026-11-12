@@ -257,6 +257,152 @@ await test('streamExport: HTTP error and abort', async () => {
   await assert.rejects(op.streamExport({ fetchImpl: async () => chunkedResponse(gz), onRow: () => {}, signal: ac.signal }), /stop now/);
 });
 
+// ---------- servings index ----------
+await test('servingGrams: same rules as rowToFood', () => {
+  assert.equal(op.servingGrams('26'), 26);
+  assert.equal(op.servingGrams(' 28.35 '), 28.4);
+  assert.equal(op.servingGrams('0.04'), 0.04, 'a value that rounds to 0 is kept');
+  assert.equal(op.servingGrams('1000'), 1000);
+  for (const s of ['', '0', '-3', 'abc', '1000.1', '1500', 'NaN', 'Infinity', undefined, null]) assert.equal(op.servingGrams(s), 0, String(s));
+  // rowToFood takes a serving exactly when servingGrams does.
+  for (const sq of ['26', '1000', '1500', '', 'abc']) {
+    const f = op.rowToFood(row({ serving_quantity: sq }), IDX);
+    assert.equal(f.s[1], op.servingGrams(sq) || 100, sq);
+  }
+});
+await test('createServingCollector: sorted, de-duplicated (first wins), limits', () => {
+  const c = op.createServingCollector(2);
+  assert.equal(c.add('5000000000017', 40), true);
+  assert.equal(c.add('0038000199929', 28), true);
+  assert.equal(c.add(' 12345678 ', 15), true);
+  assert.equal(c.add('38000199929', 99), true, 'same number as 0038000199929: later copy dropped by finish');
+  assert.equal(c.add('5000000000017', 41), true);
+  assert.equal(c.add('12345678901234', 1000), true);
+  // Rejected: code not 8-14 digits; grams not a finite number > 0 and <= 1000.
+  for (const [code, g] of [['1234567', 30], ['123456789012345', 30], ['00380002x0038', 30], ['', 30], [12345678, 30],
+    [null, 30], ['12345670', 0], ['12345670', -1], ['12345670', 1000.5], ['12345670', Number.NaN], ['12345670', '30']]) {
+    assert.equal(c.add(code, g), false, `${code} ${g}`);
+  }
+  assert.equal(c.size, 6);
+  const idx = c.finish();
+  assert.ok(idx.codes instanceof Float64Array && idx.grams instanceof Float32Array);
+  assert.deepEqual([...idx.codes], [12345678, 38000199929, 5000000000017, 12345678901234]);
+  assert.deepEqual([...idx.grams], [15, 28, 40, 1000]);
+  assert.equal(c.add('12345670', 30), false, 'no adds after finish');
+  const empty = op.createServingCollector().finish();
+  assert.equal(empty.codes.length, 0);
+  assert.equal(empty.grams.length, 0);
+});
+await test('createServingCollector: many entries match a plain sort', () => {
+  const c = op.createServingCollector(4);
+  const first = new Map();
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  for (let i = 0; i < 20000; i++) {
+    // Mix of 8 to 14 digit codes, with plenty of repeats.
+    const code = String(Math.floor(rnd() * (i % 2 ? 1e14 : 3000)) + (i % 2 ? 0 : 10000000)).padStart(8, '0');
+    const g = 1 + Math.floor(rnd() * 900);
+    if (c.add(code, g) && !first.has(Number(code))) first.set(Number(code), g);
+  }
+  const idx = c.finish();
+  const want = [...first.keys()].sort((a, b) => a - b);
+  assert.deepEqual([...idx.codes], want);
+  assert.deepEqual([...idx.grams], want.map((k) => first.get(k)));
+});
+await test('encodeServingIndex / decodeServingIndex: round trip and corrupt input', () => {
+  const c = op.createServingCollector();
+  c.add('0038000199929', 28);
+  c.add('5000000000017', 28.4);
+  c.add('99999999999999', 0.5);
+  const idx = c.finish();
+  const buf = op.encodeServingIndex(idx);
+  assert.equal(buf.length, 12 + 3 * 12);
+  assert.equal(buf.subarray(0, 8).toString('latin1'), 'MTSRV001');
+  assert.equal(buf.readUInt32LE(8), 3);
+  assert.equal(buf.readDoubleLE(12), 38000199929);
+  assert.equal(buf.readFloatLE(12 + 24), Math.fround(28));
+  const back = op.decodeServingIndex(buf);
+  assert.deepEqual([...back.codes], [...idx.codes]);
+  assert.deepEqual([...back.grams], [...idx.grams]);
+  // Works on a Buffer that is a slice of a larger allocation (odd offset).
+  const big = Buffer.alloc(buf.length + 3);
+  buf.copy(big, 3);
+  assert.deepEqual([...op.decodeServingIndex(big.subarray(3)).codes], [...idx.codes]);
+  const emptyBuf = op.encodeServingIndex(op.createServingCollector().finish());
+  assert.equal(emptyBuf.length, 12);
+  assert.equal(op.decodeServingIndex(emptyBuf).codes.length, 0);
+  // Corrupt: bad magic, truncated, extra bytes, unsorted codes, bad grams, not bytes.
+  const bad = Buffer.from(buf);
+  bad.write('MTSRV002', 0, 'latin1');
+  assert.equal(op.decodeServingIndex(bad), null);
+  assert.equal(op.decodeServingIndex(buf.subarray(0, buf.length - 1)), null);
+  assert.equal(op.decodeServingIndex(Buffer.concat([buf, Buffer.alloc(1)])), null);
+  assert.equal(op.decodeServingIndex(buf.subarray(0, 8)), null);
+  const unsorted = Buffer.from(buf);
+  unsorted.writeDoubleLE(1, 12);
+  unsorted.writeDoubleLE(0, 20);
+  assert.equal(op.decodeServingIndex(unsorted), null);
+  const zeroG = Buffer.from(buf);
+  zeroG.writeFloatLE(0, 12 + 24);
+  assert.equal(op.decodeServingIndex(zeroG), null);
+  assert.equal(op.decodeServingIndex(Buffer.from('MTSRV001 not really an index')), null);
+  assert.equal(op.decodeServingIndex('MTSRV001'), null);
+  assert.equal(op.decodeServingIndex(null), null);
+});
+await test('lookupServing: leading zeros, missing and bad codes', () => {
+  const c = op.createServingCollector();
+  c.add('0038000199929', 28);
+  c.add('00012345', 15);
+  c.add('5000000000017', 28.4);
+  const idx = c.finish();
+  assert.equal(op.lookupServing(idx, '0038000199929'), 28);
+  assert.equal(op.lookupServing(idx, '038000199929'), 28);
+  assert.equal(op.lookupServing(idx, '38000199929'), 28);
+  assert.equal(op.lookupServing(idx, ' 0038000199929 '), 28);
+  assert.equal(op.lookupServing(idx, 38000199929), 28);
+  assert.equal(op.lookupServing(idx, '12345'), 15);
+  assert.equal(op.lookupServing(idx, '5000000000017'), Math.fround(28.4));
+  for (const code of ['0038000199928', '5000000000018', '1', '', '   ', 'abc', '0038-000199929', '1e5', null, undefined, '123456789012345678']) {
+    assert.equal(op.lookupServing(idx, code), 0, String(code));
+  }
+  assert.equal(op.lookupServing(null, '0038000199929'), 0);
+  assert.equal(op.lookupServing(op.createServingCollector().finish(), '0038000199929'), 0);
+});
+await test('streamExport: servings from every row (before lineFilter), without onRow', async () => {
+  const sRows = [
+    ...rows,
+    line({ code: '0016000275263', serving_quantity: '50' }), // duplicate of Cheerios (26 g first)
+    line({ code: '4000000000001', serving_quantity: '', countries_tags: 'en:germany' }),
+    line({ code: '4000000000002', serving_quantity: '2000', countries_tags: 'en:germany' }),
+    line({ code: '123', serving_quantity: '30' }),
+    line({ code: '4000000000003', serving_quantity: '12.25', countries_tags: 'en:germany' })
+  ];
+  const gz = gzipSync(Buffer.from(`${HEADER.join('\t')}\n${sRows.join('\n')}\n`, 'utf8'));
+  const c1 = op.createServingCollector();
+  const seen = [];
+  const out = await op.streamExport({
+    fetchImpl: async () => chunkedResponse(gz, 100),
+    servings: c1,
+    lineFilter: (l) => l.includes('en:united-states'),
+    onRow: (cols, idx) => seen.push(cols[idx.code])
+  });
+  assert.equal(out.rows, 10);
+  assert.equal(seen.length, 6, 'lineFilter still applies to onRow');
+  const idx = c1.finish();
+  assert.deepEqual([...idx.codes], [16000275263, 28400012553, 38000200038, 811620022118, 3017620425035, 4000000000003]);
+  assert.equal(op.lookupServing(idx, '0016000275263'), 26);
+  assert.equal(op.lookupServing(idx, '4000000000003'), Math.fround(12.3));
+  // No onRow: rows are counted and fed to the collector only.
+  const c2 = op.createServingCollector();
+  const out2 = await op.streamExport({ fetchImpl: async () => chunkedResponse(gz, 100), servings: c2 });
+  assert.equal(out2.rows, 10);
+  assert.deepEqual([...c2.finish().codes], [...idx.codes]);
+  // An export without a serving_quantity column gives an empty index.
+  const c3 = op.createServingCollector();
+  await op.streamExport({ fetchImpl: async () => chunkedResponse(gzipSync(Buffer.from('code\tproduct_name\n12345678\tx\n')), 100), servings: c3 });
+  assert.equal(c3.size, 0);
+});
+
 // ---------- end to end + buildPack ----------
 await test('rows -> selectBrands -> buildPack', async () => {
   const foods = [];

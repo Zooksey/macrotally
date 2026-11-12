@@ -166,3 +166,8 @@ The format string stays `macrotally-pack/1`; three optional fields are added.
 - Ranking: see SPEC.md (foods.js, "Ranking of product packs").
 - Bundled like the others: `off-popular-us.json` is in `data/packs/index.json` and in `SHELL` of sw.js, and loads
   lazily with the other packs.
+- Search relay serving sizes (helper 1.8.1): the helper's export pass that builds `my-brands` also builds a
+  servings index (barcode -> serving grams, every product in the export that has a `serving_quantity` above 0 and at most 1000 g,
+  all countries; `servings.idx` in its data folder, rebuilt weekly even with no brands). `GET /v1/search` adds
+  `serving_size: "<g> g"` and `serving_quantity` to each hit whose barcode is in it, so text results show kcal per
+  serving; hits stay `partial: true` and the full product is still fetched on open. See server/README.md.

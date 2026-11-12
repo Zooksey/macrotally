@@ -2,12 +2,13 @@
 // brand endpoints on a local server with injected upstream fetches and clock (no network; Claude is never called).
 // Run from the project root: node tools/test_ai_server.mjs
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 
 const srv = await import('../server/ai-server.mjs');
+const op = await import('../server/off-pack.mjs');
 
 let passed = 0;
 function test(name, fn) {
@@ -223,7 +224,7 @@ test('buildPrompt with several photos', () => {
   assert.equal(srv.buildPrompt({ text: 'a banana', photoNames: [] }), 'User says: "a banana"');
 });
 test('limits', () => {
-  assert.equal(srv.VERSION, '1.8.0');
+  assert.equal(srv.VERSION, '1.8.1');
   assert.equal(srv.MAX_BODY, 12 * 1024 * 1024);
   assert.equal(srv.MAX_IMAGE_CHARS, 4 * 1024 * 1024);
 });
@@ -315,7 +316,8 @@ test('shouldBuild rules', () => {
   const now = Date.UTC(2026, 10, 11, 12);
   const brands = [{ name: "Kellogg's", n: 3 }];
   const fresh = { generated: '2026-11-11', builtAt: new Date(now - H).toISOString(), brands: ['kelloggs'] };
-  const base = { brands, building: false, pack: fresh, lastAttempt: now - H, lastBuildError: null, now };
+  const index = { count: 10, builtAt: new Date(now - H).toISOString() };
+  const base = { brands, building: false, pack: fresh, index, lastAttempt: now - H, lastBuildError: null, now };
   assert.equal(srv.shouldBuild(base), false);
   assert.equal(srv.shouldBuild({ ...base, brands: [] }), false);
   assert.equal(srv.shouldBuild({ ...base, pack: null }), true);
@@ -333,6 +335,49 @@ test('shouldBuild rules', () => {
   assert.equal(srv.sameBrandSet([{ name: "Kellogg's" }], ['kelloggs']), true);
   assert.equal(srv.sameBrandSet(['a', 'b'], ['b', 'a']), true);
   assert.equal(srv.sameBrandSet(['a'], ['a', 'b']), false);
+});
+test('shouldBuild: servings index rules', () => {
+  const H = 3600 * 1000;
+  const now = Date.UTC(2026, 10, 11, 12);
+  const fresh = { generated: '2026-11-11', builtAt: new Date(now - H).toISOString(), brands: ['kelloggs'] };
+  const index = { count: 10, builtAt: new Date(now - H).toISOString() };
+  const base = { brands: [{ name: "Kellogg's", n: 3 }], building: false, pack: fresh, index, lastAttempt: now - H, lastBuildError: null, now };
+  // No index (null, missing or unreadable builtAt): due, with or without brands.
+  assert.equal(srv.shouldBuild({ ...base, index: null }), true);
+  assert.equal(srv.shouldBuild({ ...base, index: undefined }), true);
+  assert.equal(srv.shouldBuild({ ...base, index: { count: 3 } }), true);
+  assert.equal(srv.shouldBuild({ ...base, brands: [], pack: null, index: null }), true);
+  assert.equal(srv.shouldBuild({ ...base, brands: undefined, pack: null, index: null }), true);
+  // Fresh index, no brands: nothing to do.
+  assert.equal(srv.shouldBuild({ ...base, brands: [], pack: null }), false);
+  // Older than 7 days: due, even with no brands; 6 days is fine.
+  const old = { count: 10, builtAt: new Date(now - 8 * 24 * H).toISOString() };
+  assert.equal(srv.shouldBuild({ ...base, brands: [], index: old }), true);
+  assert.equal(srv.shouldBuild({ ...base, index: old }), true);
+  assert.equal(srv.shouldBuild({ ...base, brands: [], index: { count: 1, builtAt: new Date(now - 6 * 24 * H).toISOString() } }), false);
+  // Not while building; a recent failure backs off 6 h.
+  assert.equal(srv.shouldBuild({ ...base, index: null, building: true }), false);
+  assert.equal(srv.shouldBuild({ ...base, brands: [], index: null, lastBuildError: 'boom', lastAttempt: now - H }), false);
+  assert.equal(srv.shouldBuild({ ...base, brands: [], index: null, lastBuildError: 'boom', lastAttempt: now - 7 * H }), true);
+});
+test('withServings: adds serving data from the index, copies, leaves others alone', () => {
+  const c = op.createServingCollector();
+  c.add('0038000199929', 28);
+  c.add('5000000000017', 28.35);
+  const idx = c.finish();
+  const a = { code: '0038000199929', product_name: 'Rice Krispies', partial: true };
+  const b = { code: '38000199929', product_name: 'Same code, no leading zeros', partial: true };
+  const d = { code: '5000000000017', product_name: 'Fraction', partial: true };
+  const e = { code: '0000000000000', product_name: 'Not in index', partial: true };
+  const out = srv.withServings([a, b, d, e], idx);
+  assert.deepEqual(out[0], { ...a, serving_size: '28 g', serving_quantity: 28 });
+  assert.deepEqual(out[1], { ...b, serving_size: '28 g', serving_quantity: 28 });
+  assert.deepEqual(out[2], { ...d, serving_size: '28.4 g', serving_quantity: 28.4 });
+  assert.equal(out[3], e);
+  assert.equal(out[0].partial, true);
+  assert.equal(a.serving_size, undefined, 'input not mutated');
+  const list = [a];
+  assert.equal(srv.withServings(list, null), list);
 });
 
 // ---------- HTTP: search relay and brand endpoints ----------
@@ -562,12 +607,11 @@ await atest('brand-pack: 404, rebuild 202 / running 200, 200 + ETag, 304, health
   st.gate = new Promise((r) => { release = r; });
   await withServer({ fetchImpl: fakeExport(st), cfg: { exportUrl: EXPORT_URL_T } }, async (base, server) => {
     const h0 = await health(base);
-    assert.equal(h0.version, '1.8.0');
-    assert.deepEqual([h0.brands, h0.pack, h0.building, h0.lastBuildError], [0, null, false, null]);
+    assert.equal(h0.version, '1.8.1');
+    assert.deepEqual([h0.brands, h0.pack, h0.servings, h0.building, h0.lastBuildError], [0, null, null, false, null]);
     const r404 = await fetch(`${base}/v1/brand-pack`, { headers: AUTH });
     assert.equal(r404.status, 404);
     assert.deepEqual(await r404.json(), { error: 'no pack yet' });
-    assert.equal((await fetch(`${base}/v1/brand-pack/rebuild`, { method: 'POST', headers: AUTH })).status, 409);
     await putBrands(base, [{ name: "Kellogg's", n: 5 }, { name: 'Fairlife', n: 1 }]);
     const r1 = await fetch(`${base}/v1/brand-pack/rebuild`, { method: 'POST', headers: AUTH });
     assert.equal(r1.status, 202);
@@ -584,6 +628,9 @@ await atest('brand-pack: 404, rebuild 202 / running 200, 200 + ETag, 304, health
     assert.deepEqual(h.pack.brands, ["Kellogg's", 'Fairlife']);
     assert.equal(h.pack.foods, 3);
     assert.match(h.pack.generated, /^\d{4}-\d\d-\d\d$/);
+    // The same pass built the servings index from every row (all countries, all brands).
+    assert.equal(h.servings.count, 6);
+    assert.match(h.servings.builtAt, /^\d{4}-\d\d-\d\dT/);
     const r = await fetch(`${base}/v1/brand-pack`, { headers: { ...AUTH, Origin: 'https://zooksey.github.io' } });
     assert.equal(r.status, 200);
     const etag = r.headers.get('etag');
@@ -609,54 +656,178 @@ await atest('brand-pack: 404, rebuild 202 / running 200, 200 + ETag, 304, health
     assert.equal(st.calls, 1);
   });
 });
-await atest('scheduler: builds when there is no pack, rebuilds a changed set after 20 h; failure recorded', async () => {
+await atest('scheduler: index-only build without brands, builds when there is no pack, rebuilds a changed set after 20 h, weekly index; failure recorded', async () => {
   const st = {};
   const clock = { t: Date.UTC(2026, 10, 11, 8) };
   await withServer({ fetchImpl: fakeExport(st), clock, cfg: { exportUrl: EXPORT_URL_T } }, async (base, server) => {
-    server.helper.tick();
-    assert.equal(st.calls || 0, 0, 'no brands, no build');
-    await putBrands(base, [{ name: 'Chobani', n: 1 }]);
+    // No brands but no servings index: an index-only build.
     server.helper.tick();
     let h = await waitIdle(base);
     assert.equal(st.calls, 1);
+    assert.equal(h.pack, null);
+    assert.equal(h.servings.count, 6);
+    assert.equal(h.servings.builtAt, new Date(clock.t).toISOString());
+    server.helper.tick();
+    await waitIdle(base);
+    assert.equal(st.calls, 1, 'fresh index, no brands: no build');
+    await putBrands(base, [{ name: 'Chobani', n: 1 }]);
+    server.helper.tick();
+    h = await waitIdle(base);
+    assert.equal(st.calls, 2);
     assert.deepEqual(h.pack.brands, ['Chobani']);
     assert.equal(h.pack.foods, 1);
     await putBrands(base, [{ name: 'Chobani', n: 1 }, { name: 'Fairlife', n: 1 }]);
     server.helper.tick();
     await waitIdle(base);
-    assert.equal(st.calls, 1, 'changed set waits 20 h');
+    assert.equal(st.calls, 2, 'changed set waits 20 h');
     clock.t += 21 * 3600 * 1000;
     st.fail = true;
     server.helper.tick();
     h = await waitIdle(base);
-    assert.equal(st.calls, 2);
+    assert.equal(st.calls, 3);
     assert.match(h.lastBuildError, /HTTP 500/);
     assert.deepEqual(h.pack.brands, ['Chobani'], 'old pack kept after a failed build');
+    assert.equal(h.servings.count, 6, 'old index kept after a failed build');
     // Retried by the same rules (a changed set: 20 h after the last attempt), then the error clears.
     st.fail = false;
     clock.t += 7 * 3600 * 1000;
     server.helper.tick();
     await waitIdle(base);
-    assert.equal(st.calls, 2);
+    assert.equal(st.calls, 3);
     clock.t += 14 * 3600 * 1000;
     server.helper.tick();
     h = await waitIdle(base);
-    assert.equal(st.calls, 3);
+    assert.equal(st.calls, 4);
     assert.equal(h.lastBuildError, null);
     assert.deepEqual(h.pack.brands, ['Chobani', 'Fairlife']);
+    // A week later the index is due again, even with the brand pack unchanged.
+    const builtAt = h.servings.builtAt;
+    clock.t += 6 * 24 * 3600 * 1000;
+    server.helper.tick();
+    await waitIdle(base);
+    assert.equal(st.calls, 4);
+    clock.t += 2 * 24 * 3600 * 1000;
+    server.helper.tick();
+    h = await waitIdle(base);
+    assert.equal(st.calls, 5);
+    assert.notEqual(h.servings.builtAt, builtAt);
+  });
+});
+
+// A second export for the servings index: codes with leading zeros, a fraction, duplicates, bad rows.
+const SROWS = [
+  ['code', 'product_name', 'countries_tags', 'serving_size', 'serving_quantity'].join('\t'),
+  ['0038000199929', 'Rice Krispies', 'en:united-states', '1 1/4 cup (28 g)', '28'].join('\t'),
+  ['5000000000017', 'British biscuit', 'en:united-kingdom', '1 biscuit', '28.35'].join('\t'),
+  ['5000000000017', 'Same code again', 'en:united-kingdom', '', '99'].join('\t'),
+  ['0000000000123', 'No serving', 'en:united-states', '', ''].join('\t'),
+  ['0000000000456', 'Huge serving', 'en:united-states', '', '1500'].join('\t'),
+  ['123', 'Short code', 'en:united-states', '', '30'].join('\t')
+].join('\n') + '\n';
+const SEARCH_HITS = {
+  hits: [
+    { code: '0038000199929', product_name: 'Rice Krispies', brands: ["Kellogg's"], unique_scans_n: 5, nutriments: { 'energy-kcal_100g': 375 } },
+    { code: '5000000000017', product_name: 'Rice biscuit', nutriments: { 'energy-kcal_100g': 480 } },
+    { code: '2030606199943', product_name: 'rice krispies' }
+  ]
+};
+/** fetch serving both the export (EXPORT_URL_T) and the search upstream. */
+function fakeBoth(state = {}) {
+  const gz = gzipSync(Buffer.from(SROWS, 'utf8'));
+  return async (url) => {
+    if (url === EXPORT_URL_T) {
+      state.exportCalls = (state.exportCalls || 0) + 1;
+      return new Response(gz);
+    }
+    state.searchCalls = (state.searchCalls || 0) + 1;
+    return Response.json(SEARCH_HITS);
+  };
+}
+const rebuild = (base) => fetch(`${base}/v1/brand-pack/rebuild`, { method: 'POST', headers: AUTH });
+
+await atest('rebuild with no brands: 202, index-only build, no pack, files written', async () => {
+  const st = {};
+  const dir = freshDir();
+  await withServer({ fetchImpl: fakeBoth(st), cfg: { exportUrl: EXPORT_URL_T, dataDir: dir } }, async (base) => {
+    const r = await rebuild(base);
+    assert.equal(r.status, 202);
+    assert.deepEqual(await r.json(), { started: true });
+    const h = await waitIdle(base);
+    assert.equal(st.exportCalls, 1);
+    assert.equal(h.lastBuildError, null);
+    assert.equal(h.pack, null);
+    assert.equal(h.servings.count, 2);
+    assert.equal((await fetch(`${base}/v1/brand-pack`, { headers: AUTH })).status, 404);
+    const idx = op.decodeServingIndex(readFileSync(path.join(dir, 'servings.idx')));
+    assert.deepEqual([...idx.codes], [38000199929, 5000000000017]);
+    assert.equal(op.lookupServing(idx, '5000000000017'), Math.fround(28.4), 'first copy of a code wins');
+    const state = JSON.parse(readFileSync(path.join(dir, 'build-state.json'), 'utf8'));
+    assert.deepEqual(state.servings, h.servings);
+    assert.equal(existsSync(path.join(dir, 'brand-pack.json')), false);
+  });
+});
+await atest('servings index: loaded at startup; a corrupt file is ignored', async () => {
+  const dir = freshDir();
+  let first;
+  await withServer({ fetchImpl: fakeBoth(), cfg: { exportUrl: EXPORT_URL_T, dataDir: dir } }, async (base) => {
+    await rebuild(base);
+    first = (await waitIdle(base)).servings;
+  });
+  await withServer({ fetchImpl: fakeBoth(), cfg: { dataDir: dir } }, async (base) => {
+    assert.deepEqual((await health(base)).servings, first);
+    const j = await (await fetch(`${base}/v1/search?q=rice`)).json();
+    assert.equal(j.products[0].serving_size, '28 g');
+  });
+  writeFileSync(path.join(dir, 'servings.idx'), 'MTSRV001 not really an index');
+  await withServer({ fetchImpl: fakeBoth(), cfg: { dataDir: dir } }, async (base, server) => {
+    assert.equal((await health(base)).servings, null);
+    const j = await (await fetch(`${base}/v1/search?q=rice`)).json();
+    assert.equal(j.products[0].serving_size, undefined);
+    assert.equal(server.helper.status().servings, null);
+  });
+});
+await atest('GET /v1/search: serving data from the index, also for a search cached before the index', async () => {
+  const st = {};
+  await withServer({ fetchImpl: fakeBoth(st), cfg: { exportUrl: EXPORT_URL_T } }, async (base) => {
+    const before = await (await fetch(`${base}/v1/search?q=rice`)).json();
+    assert.equal(before.cached, false);
+    assert.equal(before.products.length, 3);
+    for (const p of before.products) {
+      assert.equal(p.serving_size, undefined);
+      assert.equal(p.serving_quantity, undefined);
+    }
+    await rebuild(base);
+    await waitIdle(base);
+    const after = await (await fetch(`${base}/v1/search?q=rice`)).json();
+    assert.equal(after.cached, true);
+    assert.equal(st.searchCalls, 1);
+    assert.deepEqual(after.products[0], { ...before.products[0], serving_size: '28 g', serving_quantity: 28 });
+    assert.deepEqual(after.products[1], { ...before.products[1], serving_size: '28.4 g', serving_quantity: 28.4 });
+    assert.equal(after.products[0].partial, true);
+    // A hit without an index entry is unchanged.
+    assert.deepEqual(after.products[2], before.products[2]);
+    // A fresh (uncached) search is enriched too.
+    const other = await (await fetch(`${base}/v1/search?q=krispies`)).json();
+    assert.equal(other.cached, false);
+    assert.equal(other.products[0].serving_quantity, 28);
+    // And the cache still holds the bare hits (served again, still enriched, never doubled up).
+    const again = await (await fetch(`${base}/v1/search?q=rice`)).json();
+    assert.deepEqual(again.products, after.products);
   });
 });
 await atest('missing DATA_DIR: brand endpoints 503, search and health still work', async () => {
   const file = path.join(tmpRoot, 'not-a-dir');
   writeFileSync(file, 'x');
-  await withServer({ fetchImpl: fakeSearch(), cfg: { dataDir: path.join(file, 'data') } }, async (base) => {
+  await withServer({ fetchImpl: fakeSearch(), cfg: { dataDir: path.join(file, 'data') } }, async (base, server) => {
     for (const [method, p] of [['GET', '/v1/brands'], ['PUT', '/v1/brands'], ['GET', '/v1/brand-pack'], ['POST', '/v1/brand-pack/rebuild']]) {
       const r = await fetch(`${base}${p}`, { method, headers: AUTH, body: method === 'PUT' ? '{"brands":[]}' : undefined });
       assert.equal(r.status, 503, `${method} ${p}`);
       assert.deepEqual(await r.json(), { error: 'no data dir' });
     }
     const h = await health(base);
-    assert.deepEqual([h.ok, h.brands, h.pack, h.building], [true, 0, null, false]);
+    assert.deepEqual([h.ok, h.brands, h.pack, h.servings, h.building], [true, 0, null, null, false]);
+    server.helper.tick();
+    assert.equal(server.helper.status().building, false, 'no build without a data dir');
     assert.equal((await fetch(`${base}/v1/search?q=milk`)).status, 200);
   });
 });

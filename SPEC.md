@@ -310,7 +310,9 @@ Errors from `fetch` should surface as thrown `Error` with a friendly message ("N
 **Search relay (v1.8).** `searchFoodsDetailed(query, { ..., relayUrl })` (callers pass `aiUrl(state)`; blank = skip):
 the OFF text search first calls `GET {relayUrl}/v1/search?q=<text>&region=<code>` with no Authorization, a 6 s
 timeout and no retry. 200 → `{ products: [...OFF-shaped, partial: true], source, cached }`, mapped through
-`foodFromOFF` (no serving sizes → per-100 g foods without servings) with `_partial: true`. On ANY failure (network,
+`foodFromOFF` with `_partial: true`. Upstream sends no serving sizes; helper 1.8.1+ adds `serving_size: "28 g"`
+and `serving_quantity: 28` from its servings index when it knows the barcode (one serving, "1 serving (28 g)", so
+the row shows kcal per serving), else the food is per 100 g without servings. On ANY failure (network,
 non-200, unreadable JSON, no `products` array) the legacy `cgi/search.pl` runs, retried once (429/503/network).
 A relay that answers 401/404 (a helper without the relay) is skipped for 10 minutes (per relay address, per session).
 The second chance's corrected OFF search goes relay-first too; the session cache key includes whether a relay was
